@@ -1,0 +1,179 @@
+package com.wry.deviceobserver.monitor;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * 进程监控：root 下遍历 /proc/[pid]/ 获取所有进程的 CPU、内存、网络信息。
+ * 非 root 下只能获取自身进程信息。
+ */
+public class ProcessMonitor {
+
+    private final boolean isRoot;
+
+    public ProcessMonitor(boolean isRoot) {
+        this.isRoot = isRoot;
+    }
+
+    /**
+     * 扫描所有进程
+     * root: 遍历 /proc 目录所有数字子目录
+     * 非 root: 只返回当前进程
+     */
+    public List<ProcessInfo> scanAllProcesses() {
+        List<ProcessInfo> processes = new ArrayList<>();
+
+        if (isRoot) {
+            File procDir = new File("/proc");
+            File[] pidDirs = procDir.listFiles(
+                (dir, name) -> name.matches("\\d+"));
+            if (pidDirs == null) return processes;
+
+            for (File pidDir : pidDirs) {
+                int pid = Integer.parseInt(pidDir.getName());
+                ProcessInfo info = readProcessInfo(pid);
+                if (info != null) {
+                    processes.add(info);
+                }
+            }
+        } else {
+            // 非 root：只能看自己
+            int myPid = android.os.Process.myPid();
+            ProcessInfo info = readProcessInfo(myPid);
+            if (info != null) {
+                info.packageName = "self";
+                processes.add(info);
+            }
+        }
+
+        return processes;
+    }
+
+    /**
+     * 读取单个进程信息
+     * /proc/[pid]/cmdline  → 进程名
+     * /proc/[pid]/status   → VmRSS, VmSwap, Threads
+     * /proc/[pid]/stat     → CPU jiffies
+     */
+    public ProcessInfo readProcessInfo(int pid) {
+        ProcessInfo info = new ProcessInfo();
+        info.pid = pid;
+
+        // 进程名 / 包名
+        info.name = readFirstLine("/proc/" + pid + "/cmdline");
+        if (info.name != null) {
+            info.name = info.name.replace('\0', ' ').trim();
+        }
+        if (info.name == null || info.name.isEmpty()) {
+            info.name = readFirstLine("/proc/" + pid + "/comm");
+            if (info.name == null) return null;
+        }
+
+        // 内存：VmRSS + VmSwap
+        readMemoryInfo(pid, info);
+
+        // CPU：jiffies（需要两次采样计算）
+        info.cpuJiffies = readCpuJiffies(pid);
+
+        // 线程数
+        info.threads = readThreadCount(pid);
+
+        return info;
+    }
+
+    /**
+     * 计算两个采样点之间的 CPU 使用率
+     */
+    public static float calculateCpuUsage(long[] prev, long[] cur, long clockTicksPerSec) {
+        if (prev == null || cur == null || prev.length < 2 || cur.length < 2) return 0;
+        long diff = (cur[0] + cur[1]) - (prev[0] + prev[1]);
+        if (diff < 0) return 0;
+        return (float) diff / clockTicksPerSec * 100f;
+    }
+
+    /**
+     * 读取 /proc/[pid]/stat 的 utime + stime（单位：clock ticks）
+     */
+    private long[] readCpuJiffies(int pid) {
+        try (BufferedReader br = new BufferedReader(
+                new FileReader("/proc/" + pid + "/stat"))) {
+            String line = br.readLine();
+            if (line == null) return null;
+            // stat 格式: pid (comm) state ppid ... utime stime ...
+            // utime 和 stime 在第 14 和 15 个字段，但 comm 可能含空格和括号
+            int lastParen = line.lastIndexOf(')');
+            if (lastParen < 0) return null;
+            String[] fields = line.substring(lastParen + 2).trim().split("\\s+");
+            // fields[0]=state, fields[1]=ppid, ..., fields[11]=utime, fields[12]=stime
+            if (fields.length < 13) return null;
+            long utime = Long.parseLong(fields[11]);
+            long stime = Long.parseLong(fields[12]);
+            return new long[]{utime, stime};
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 读取 /proc/[pid]/status 获取 VmRSS, VmSwap, VmSize
+     */
+    private void readMemoryInfo(int pid, ProcessInfo info) {
+        try (BufferedReader br = new BufferedReader(
+                new FileReader("/proc/" + pid + "/status"))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                if (line.startsWith("VmRSS:")) info.vmRssKb = parseKb(line);
+                else if (line.startsWith("VmSwap:")) info.vmSwapKb = parseKb(line);
+                else if (line.startsWith("VmSize:")) info.vmSizeKb = parseKb(line);
+                else if (line.startsWith("Threads:")) {
+                    String[] parts = line.split("\\s+");
+                    if (parts.length >= 2) info.threads = Integer.parseInt(parts[1]);
+                }
+            }
+        } catch (Exception e) {
+            // ignore
+        }
+    }
+
+    private int readThreadCount(int pid) {
+        File taskDir = new File("/proc/" + pid + "/task");
+        File[] threads = taskDir.listFiles();
+        return threads != null ? threads.length : 1;
+    }
+
+    private String readFirstLine(String path) {
+        try (BufferedReader br = new BufferedReader(new FileReader(path))) {
+            return br.readLine();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private long parseKb(String line) {
+        String[] parts = line.split("\\s+");
+        if (parts.length >= 2) {
+            return Long.parseLong(parts[1]);
+        }
+        return 0;
+    }
+
+    // ===== 数据类 =====
+
+    public static class ProcessInfo {
+        public int pid;
+        public String name = "";
+        public String packageName = null;
+        public long vmRssKb;       // 物理内存（常驻集大小）
+        public long vmSwapKb;      // 交换分区
+        public long vmSizeKb;      // 虚拟内存总量
+        public int threads = 1;
+        public long[] cpuJiffies;  // [utime, stime] 用于计算 CPU 占用
+        public float cpuUsagePct;  // 计算后的 CPU 使用率
+
+        // 内存泄漏嫌疑标记
+        public boolean suspicious;
+    }
+}
