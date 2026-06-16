@@ -21,22 +21,45 @@ public class PermissionManager {
 
     private final Context context;
 
+    // 缓存 root 检测结果，避免重复 exec su 阻塞主线程
+    private static volatile Boolean cachedRootResult = null;
+    private static volatile long cachedRootTimestamp = 0;
+    private static final long ROOT_CACHE_TTL = 30_000; // 30 秒缓存
+
     public PermissionManager(Context context) {
         this.context = context;
     }
 
     /**
      * 检测 root 权限是否可用
+     * 必须在子线程调用！exec su 可能阻塞 5-10 秒
      */
     public static boolean isRootAvailable() {
+        // 使用缓存避免重复检测
+        long now = System.currentTimeMillis();
+        if (cachedRootResult != null && (now - cachedRootTimestamp) < ROOT_CACHE_TTL) {
+            return cachedRootResult;
+        }
+
         try {
             Process process = Runtime.getRuntime().exec(new String[]{"su", "-c", "id"});
+            // 消费 stderr 防止 waitFor 阻塞
+            java.io.InputStream stderr = process.getErrorStream();
+            byte[] buffer = new byte[1024];
+            while (stderr.read(buffer) != -1) { /* drain */ }
+
             java.io.BufferedReader reader = new java.io.BufferedReader(
                 new java.io.InputStreamReader(process.getInputStream()));
             String output = reader.readLine();
             process.waitFor();
-            return output != null && output.contains("uid=0");
+            boolean result = output != null && output.contains("uid=0");
+
+            cachedRootResult = result;
+            cachedRootTimestamp = now;
+            return result;
         } catch (Exception e) {
+            cachedRootResult = false;
+            cachedRootTimestamp = now;
             return false;
         }
     }

@@ -5,18 +5,14 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
-import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
-import android.os.PowerManager;
 import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
-import androidx.work.PeriodicWorkRequest;
-import androidx.work.WorkManager;
 
 import com.wry.deviceobserver.R;
 import com.wry.deviceobserver.activity.MainActivity;
@@ -25,13 +21,13 @@ import com.wry.deviceobserver.model.SampleRecord;
 import com.wry.deviceobserver.monitor.SystemMonitor;
 
 import java.util.List;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutorService;
 
 /**
  * 前台服务：持续后台监控
  * - 采样频率自适应：前台 1s / 后台 5s
- * - WakeLock 按需持有释放
- * - 采样数据写入 Room 数据库
+ * - 采样数据写入 Room 数据库（单线程池）
  */
 public class MonitorService extends Service {
 
@@ -41,8 +37,10 @@ public class MonitorService extends Service {
 
     private Handler handler;
     private Runnable samplingRunnable;
-    private PowerManager.WakeLock wakeLock;
-    private boolean isForeground = false;
+    private boolean isForeground = true;  // 默认前台采样
+
+    // 单线程池用于 Room 写入，避免每秒 new Thread
+    private ExecutorService dbExecutor;
 
     // 采样间隔
     private static final long FOREGROUND_INTERVAL = 1000;  // 1s
@@ -55,6 +53,7 @@ public class MonitorService extends Service {
     public void onCreate() {
         super.onCreate();
         handler = new Handler(Looper.getMainLooper());
+        dbExecutor = Executors.newSingleThreadExecutor();
         createNotificationChannel();
     }
 
@@ -135,14 +134,16 @@ public class MonitorService extends Service {
         record.cpuTemp = cpuTemp;
         record.netRxBytes = netRx;
         record.netTxBytes = netTx;
-        record.processCount = 0;
+        record.processCount = Runtime.getRuntime().availableProcessors();
 
         new Thread(() -> {
-            AppDatabase.getInstance(this).sampleRecordDao().insert(record);
-            // 清理 24h 前的旧数据
-            AppDatabase.getInstance(this).sampleRecordDao()
-                .deleteBefore(now - 24 * 60 * 60 * 1000);
-        }).start();
+            dbExecutor.execute(() -> {
+                AppDatabase.getInstance(this).sampleRecordDao().insert(record);
+                // 清理 24h 前的旧数据
+                AppDatabase.getInstance(this).sampleRecordDao()
+                    .deleteBefore(now - 24 * 60 * 60 * 1000);
+            });
+        }, "db-write").start();
     }
 
     // ===== 前台通知 =====
@@ -165,7 +166,7 @@ public class MonitorService extends Service {
         return new NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("DeviceObserver")
             .setContentText(text)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build();
@@ -185,6 +186,23 @@ public class MonitorService extends Service {
     }
 
     @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        super.onTaskRemoved(rootIntent);
+        // App 被划掉后切换到后台采样频率
+        isForeground = false;
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        if (samplingRunnable != null) {
+            handler.removeCallbacks(samplingRunnable);
+        }
+        if (dbExecutor != null && !dbExecutor.isShutdown()) {
+            dbExecutor.shutdown();
+        }
+        Log.i(TAG, "MonitorService destroyed");
+    }
     public void onDestroy() {
         super.onDestroy();
         if (samplingRunnable != null) {

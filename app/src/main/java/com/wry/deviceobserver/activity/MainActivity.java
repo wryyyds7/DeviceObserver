@@ -4,6 +4,7 @@ import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.view.View;
 import android.widget.TextView;
 
 import androidx.appcompat.app.AppCompatActivity;
@@ -77,69 +78,88 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void performSample() {
-        // CPU
-        long[] curStat = SystemMonitor.readCpuStat();
-        float cpuUsage = 0;
-        if (prevCpuStat != null) {
-            float[] usage = SystemMonitor.getCpuUsageRate(prevCpuStat);
-            if (usage != null) cpuUsage = usage[1];
-        }
-        prevCpuStat = curStat;
-        chartCpu.addPoint(cpuUsage);
-
-        // 内存
-        long[] memInfo = SystemMonitor.getMemoryInfo();
-        long memTotal = memInfo[0];
-        long memAvailable = memInfo[2] > 0 ? memInfo[2] : memInfo[1];
-        float memUsagePct = memTotal > 0
-            ? (float) (memTotal - memAvailable) / memTotal * 100f
-            : 0;
-        chartMemory.addPoint(memUsagePct);
-
-        // 温度
-        float cpuTemp = 0;
-        List<SystemMonitor.ThermalZone> zones = SystemMonitor.getThermalZones();
-        for (SystemMonitor.ThermalZone z : zones) {
-            if (z.type.contains("cpu") || z.type.contains("CPU")) {
-                cpuTemp = (float) z.tempCelsius;
-                break;
+        // 文件 I/O 移到子线程，避免阻塞 UI
+        new Thread(() -> {
+            // CPU
+            long[] curStat = SystemMonitor.readCpuStat();
+            float cpuUsage = 0;
+            if (prevCpuStat != null) {
+                float[] usage = SystemMonitor.getCpuUsageRate(prevCpuStat);
+                if (usage != null) cpuUsage = usage[1];
             }
-        }
-        if (cpuTemp == 0 && !zones.isEmpty()) {
-            cpuTemp = (float) zones.get(0).tempCelsius;
-        }
-        chartTemp.addPoint(cpuTemp);
+            prevCpuStat = curStat;
 
-        // 网络流量（增量）
-        long netRx = 0, netTx = 0;
-        List<SystemMonitor.NetworkInterface> ifs = SystemMonitor.getNetworkInterfaces();
-        for (SystemMonitor.NetworkInterface ni : ifs) {
-            if (!ni.name.equals("lo")) {
-                netRx += ni.rxBytes;
-                netTx += ni.txBytes;
+            // 内存
+            long[] memInfo = SystemMonitor.getMemoryInfo();
+            long memTotal = memInfo[0];
+            long memAvailable = memInfo[2] > 0 ? memInfo[2] : memInfo[1];
+            float memUsagePct = memTotal > 0
+                ? (float) (memTotal - memAvailable) / memTotal * 100f
+                : 0;
+
+            // 温度
+            float cpuTemp = 0;
+            List<SystemMonitor.ThermalZone> zones = SystemMonitor.getThermalZones();
+            for (SystemMonitor.ThermalZone z : zones) {
+                if (z.type.contains("cpu") || z.type.contains("CPU")) {
+                    cpuTemp = (float) z.tempCelsius;
+                    break;
+                }
             }
-        }
-        long rxRate = prevRxBytes > 0 ? (netRx - prevRxBytes) : 0;
-        long txRate = prevTxBytes > 0 ? (netTx - prevTxBytes) : 0;
-        prevRxBytes = netRx;
-        prevTxBytes = netTx;
+            if (cpuTemp == 0 && !zones.isEmpty()) {
+                cpuTemp = (float) zones.get(0).tempCelsius;
+            }
 
-        // 摘要
-        String summary = String.format(
-            "CPU: %.1f%%  |  Mem: %.1f%%  |  Temp: %.1f°C  |  ↑ %s  ↓ %s",
-            cpuUsage,
-            memUsagePct,
-            cpuTemp,
-            formatBytes(txRate),
-            formatBytes(rxRate)
-        );
-        tvSummary.setText(summary);
+            // 网络流量（增量）
+            long netRx = 0, netTx = 0;
+            List<SystemMonitor.NetworkInterface> ifs = SystemMonitor.getNetworkInterfaces();
+            for (SystemMonitor.NetworkInterface ni : ifs) {
+                if (!ni.name.equals("lo")) {
+                    netRx += ni.rxBytes;
+                    netTx += ni.txBytes;
+                }
+            }
+            long rxRate = prevRxBytes > 0 ? (netRx - prevRxBytes) : 0;
+            long txRate = prevTxBytes > 0 ? (netTx - prevTxBytes) : 0;
+            prevRxBytes = netRx;
+            prevTxBytes = netTx;
+
+            // UI 更新回到主线程
+            final float finalCpuUsage = cpuUsage;
+            final float finalMemUsagePct = memUsagePct;
+            final float finalCpuTemp = cpuTemp;
+            final long finalTxRate = txRate;
+            final long finalRxRate = rxRate;
+
+            runOnUiThread(() -> {
+                chartCpu.addPoint(finalCpuUsage);
+                chartMemory.addPoint(finalMemUsagePct);
+                chartTemp.addPoint(finalCpuTemp);
+
+                String summary = String.format(
+                    "CPU: %.1f%%  |  Mem: %.1f%%  |  Temp: %.1f°C  |  ↑ %s  ↓ %s",
+                    finalCpuUsage,
+                    finalMemUsagePct,
+                    finalCpuTemp,
+                    formatBytes(finalTxRate),
+                    formatBytes(finalRxRate)
+                );
+                tvSummary.setText(summary);
+            });
+        }).start();
     }
 
     private String formatBytes(long bytes) {
         if (bytes < 1024) return bytes + "B";
         if (bytes < 1024 * 1024) return String.format("%.1fKB", bytes / 1024.0);
         return String.format("%.1fMB", bytes / 1024.0 / 1024);
+    }
+
+    /**
+     * 进程列表入口
+     */
+    public void onProcessClick(View view) {
+        startActivity(new Intent(this, ProcessActivity.class));
     }
 
     @Override

@@ -1,6 +1,5 @@
 package com.wry.deviceobserver.activity;
 
-import android.app.AlertDialog;
 import android.content.Intent;
 import android.os.Build;
 import android.os.Bundle;
@@ -34,6 +33,8 @@ public class PermissionActivity extends AppCompatActivity {
         registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
             updateStatus();
         });
+
+    private boolean cachedRoot = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -69,13 +70,11 @@ public class PermissionActivity extends AppCompatActivity {
             finish();
         });
 
-        // root 检测在子线程执行（su 可能阻塞）
+        // root 检测：仅一次，子线程执行，结果缓存
         new Thread(() -> {
-            boolean hasRoot = PermissionManager.isRootAvailable();
+            cachedRoot = PermissionManager.isRootAvailable();
             runOnUiThread(this::updateStatus);
         }).start();
-
-        updateStatus();
     }
 
     @Override
@@ -85,13 +84,8 @@ public class PermissionActivity extends AppCompatActivity {
     }
 
     private void updateStatus() {
-        // root
-        new Thread(() -> {
-            boolean hasRoot = PermissionManager.isRootAvailable();
-            runOnUiThread(() -> {
-                tvRootStatus.setText(hasRoot ? "✅ 已授权" : "❌ 未授权（降级模式）");
-            });
-        }).start();
+        // root：使用缓存结果，不再重复 exec su
+        tvRootStatus.setText(cachedRoot ? "✅ 已授权" : "❌ 未授权（降级模式）");
 
         // 使用情况
         boolean hasUsageStats = permissionManager.hasUsageStatsPermission();
@@ -102,8 +96,8 @@ public class PermissionActivity extends AppCompatActivity {
         boolean hasNotification = permissionManager.hasNotificationPermission();
         tvNotificationStatus.setText(hasNotification ? "✅ 已授权" : "❌ 未授权");
 
-        // 权限等级
-        PermissionManager.PermissionLevel level = permissionManager.getPermissionLevel();
+        // 权限等级（使用缓存的 root 结果，不在主线程 exec su）
+        PermissionManager.PermissionLevel level = determineLevel();
         String levelText;
         switch (level) {
             case FULL: levelText = "FULL — 全功能模式"; break;
@@ -118,5 +112,21 @@ public class PermissionActivity extends AppCompatActivity {
             android.R.layout.simple_list_item_1, features));
 
         btnStart.setEnabled(true);
+    }
+
+    /**
+     * 使用缓存的 root 结果确定权限等级，不触发 su
+     */
+    private PermissionManager.PermissionLevel determineLevel() {
+        boolean hasUsageStats = permissionManager.hasUsageStatsPermission();
+        boolean hasNotification = permissionManager.hasNotificationPermission();
+
+        if (cachedRoot && hasUsageStats && hasNotification) {
+            return PermissionManager.PermissionLevel.FULL;
+        } else if (hasUsageStats && hasNotification) {
+            return PermissionManager.PermissionLevel.PARTIAL;
+        } else {
+            return PermissionManager.PermissionLevel.BASIC;
+        }
     }
 }

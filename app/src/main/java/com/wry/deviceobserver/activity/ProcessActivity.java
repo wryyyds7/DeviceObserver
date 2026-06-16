@@ -33,8 +33,14 @@ public class ProcessActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_process);
 
-        boolean hasRoot = PermissionManager.isRootAvailable();
-        processMonitor = new ProcessMonitor(hasRoot);
+        // root 检测在子线程，使用 PermissionManager 缓存
+        new Thread(() -> {
+            boolean hasRoot = PermissionManager.isRootAvailable();
+            runOnUiThread(() -> {
+                processMonitor = new ProcessMonitor(hasRoot);
+                startSampling();
+            });
+        }).start();
 
         RecyclerView recyclerView = findViewById(R.id.rv_processes);
         recyclerView.setLayoutManager(new LinearLayoutManager(this));
@@ -42,7 +48,6 @@ public class ProcessActivity extends AppCompatActivity {
         recyclerView.setAdapter(adapter);
 
         handler = new Handler(Looper.getMainLooper());
-        startSampling();
     }
 
     private void startSampling() {

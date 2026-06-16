@@ -157,7 +157,8 @@ public class SystemMonitor {
 
     private static int readIntFromFile(String path) {
         try (BufferedReader br = new BufferedReader(new FileReader(path))) {
-            return Integer.parseInt(br.readLine().trim());
+            String line = br.readLine();
+            return line != null ? Integer.parseInt(line.trim()) : -1;
         } catch (Exception e) {
             return -1;
         }
@@ -165,7 +166,8 @@ public class SystemMonitor {
 
     private static String readStringFromFile(String path) {
         try (BufferedReader br = new BufferedReader(new FileReader(path))) {
-            return br.readLine().trim();
+            String line = br.readLine();
+            return line != null ? line.trim() : null;
         } catch (Exception e) {
             return null;
         }
