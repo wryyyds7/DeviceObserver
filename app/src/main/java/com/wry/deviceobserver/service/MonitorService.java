@@ -23,11 +23,14 @@ import com.wry.deviceobserver.monitor.SystemMonitor;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * 前台服务：持续后台监控
+ * 前台服务：持续后台监控 + 数据持久化
  * - 采样频率自适应：前台 1s / 后台 5s
+ * - 采样 I/O 在子线程执行，不阻塞主线程
  * - 采样数据写入 Room 数据库（单线程池）
+ * - 不做 CPU 使用率计算（由 MainActivity 负责），仅持久化
  */
 public class MonitorService extends Service {
 
@@ -37,23 +40,22 @@ public class MonitorService extends Service {
 
     private Handler handler;
     private Runnable samplingRunnable;
-    private boolean isForeground = true;  // 默认前台采样
+    private boolean isForeground = true;
 
-    // 单线程池用于 Room 写入，避免每秒 new Thread
-    private ExecutorService dbExecutor;
+    // 单线程池：采样 I/O + Room 写入
+    private ExecutorService workExecutor;
 
     // 采样间隔
     private static final long FOREGROUND_INTERVAL = 1000;  // 1s
     private static final long BACKGROUND_INTERVAL = 5000;  // 5s
 
-    // CPU 采样状态
-    private long[] prevCpuStat = null;
+    private final AtomicBoolean running = new AtomicBoolean(true);
 
     @Override
     public void onCreate() {
         super.onCreate();
         handler = new Handler(Looper.getMainLooper());
-        dbExecutor = Executors.newSingleThreadExecutor();
+        workExecutor = Executors.newSingleThreadExecutor();
         createNotificationChannel();
     }
 
@@ -68,6 +70,7 @@ public class MonitorService extends Service {
         samplingRunnable = new Runnable() {
             @Override
             public void run() {
+                if (!running.get()) return;
                 performSample();
                 long interval = isForeground ? FOREGROUND_INTERVAL : BACKGROUND_INTERVAL;
                 handler.postDelayed(this, interval);
@@ -77,73 +80,60 @@ public class MonitorService extends Service {
     }
 
     /**
-     * 执行一次采样
+     * 执行一次采样 —— I/O 在子线程执行，不阻塞主线程
      */
     private void performSample() {
-        long now = System.currentTimeMillis();
+        workExecutor.execute(() -> {
+            long now = System.currentTimeMillis();
 
-        // CPU 使用率（两次采样计算）
-        float cpuUsage = 0;
-        long[] curStat = SystemMonitor.readCpuStat();
-        if (prevCpuStat != null && curStat != null) {
-            float[] usage = SystemMonitor.getCpuUsageRate(prevCpuStat);
-            if (usage != null) cpuUsage = usage[1];
-        }
-        prevCpuStat = curStat;
+            // 内存
+            long[] memInfo = SystemMonitor.getMemoryInfo();
+            long memAvailable = memInfo[2] > 0 ? memInfo[2] : memInfo[1];
 
-        // CPU 核心频率
-        List<Integer> coreFreqs = SystemMonitor.getCpuCoreFrequencies();
-
-        // 内存
-        long[] memInfo = SystemMonitor.getMemoryInfo();
-        long memAvailable = memInfo[2] > 0 ? memInfo[2] : memInfo[1];
-
-        // 温度
-        float cpuTemp = 0;
-        List<SystemMonitor.ThermalZone> zones = SystemMonitor.getThermalZones();
-        for (SystemMonitor.ThermalZone z : zones) {
-            if (z.type.contains("cpu") || z.type.contains("CPU")) {
-                cpuTemp = (float) z.tempCelsius;
-                break;
+            // 温度
+            float cpuTemp = 0;
+            List<SystemMonitor.ThermalZone> zones = SystemMonitor.getThermalZones();
+            for (SystemMonitor.ThermalZone z : zones) {
+                if (z.type.contains("cpu") || z.type.contains("CPU")) {
+                    cpuTemp = (float) z.tempCelsius;
+                    break;
+                }
             }
-        }
-        if (cpuTemp == 0 && !zones.isEmpty()) {
-            cpuTemp = (float) zones.get(0).tempCelsius;
-        }
-
-        // 网络流量
-        long netRx = 0, netTx = 0;
-        List<SystemMonitor.NetworkInterface> netIfs = SystemMonitor.getNetworkInterfaces();
-        for (SystemMonitor.NetworkInterface ni : netIfs) {
-            if (!ni.name.equals("lo")) {
-                netRx += ni.rxBytes;
-                netTx += ni.txBytes;
+            if (cpuTemp == 0 && !zones.isEmpty()) {
+                cpuTemp = (float) zones.get(0).tempCelsius;
             }
-        }
 
-        // 温度告警
-        if (cpuTemp > 60) {
-            updateNotification("⚠ 温度告警: " + String.format("%.1f", cpuTemp) + "°C");
-        }
+            // 网络流量
+            long netRx = 0, netTx = 0;
+            List<SystemMonitor.NetworkInterface> netIfs = SystemMonitor.getNetworkInterfaces();
+            for (SystemMonitor.NetworkInterface ni : netIfs) {
+                if (!ni.name.equals("lo")) {
+                    netRx += ni.rxBytes;
+                    netTx += ni.txBytes;
+                }
+            }
 
-        // 持久化到 Room
-        SampleRecord record = new SampleRecord();
-        record.timestamp = now;
-        record.cpuUsage = cpuUsage;
-        record.memAvailableKb = memAvailable;
-        record.cpuTemp = cpuTemp;
-        record.netRxBytes = netRx;
-        record.netTxBytes = netTx;
-        record.processCount = Runtime.getRuntime().availableProcessors();
+            // 温度告警
+            if (cpuTemp > 60) {
+                handler.post(() -> updateNotification("⚠ 温度告警: "
+                    + String.format("%.1f", cpuTemp) + "°C"));
+            }
 
-        new Thread(() -> {
-            dbExecutor.execute(() -> {
-                AppDatabase.getInstance(this).sampleRecordDao().insert(record);
-                // 清理 24h 前的旧数据
-                AppDatabase.getInstance(this).sampleRecordDao()
-                    .deleteBefore(now - 24 * 60 * 60 * 1000);
-            });
-        }, "db-write").start();
+            // 持久化到 Room
+            SampleRecord record = new SampleRecord();
+            record.timestamp = now;
+            record.cpuUsage = 0;  // CPU 使用率由 MainActivity 计算，Service 仅持久化
+            record.memAvailableKb = memAvailable;
+            record.cpuTemp = cpuTemp;
+            record.netRxBytes = netRx;
+            record.netTxBytes = netTx;
+            record.processCount = Runtime.getRuntime().availableProcessors();
+
+            AppDatabase.getInstance(this).sampleRecordDao().insert(record);
+            // 清理 24h 前的旧数据
+            AppDatabase.getInstance(this).sampleRecordDao()
+                .deleteBefore(now - 24 * 60 * 60 * 1000);
+        });
     }
 
     // ===== 前台通知 =====
@@ -188,28 +178,18 @@ public class MonitorService extends Service {
     @Override
     public void onTaskRemoved(Intent rootIntent) {
         super.onTaskRemoved(rootIntent);
-        // App 被划掉后切换到后台采样频率
         isForeground = false;
     }
 
     @Override
     public void onDestroy() {
         super.onDestroy();
+        running.set(false);
         if (samplingRunnable != null) {
             handler.removeCallbacks(samplingRunnable);
         }
-        if (dbExecutor != null && !dbExecutor.isShutdown()) {
-            dbExecutor.shutdown();
-        }
-        Log.i(TAG, "MonitorService destroyed");
-    }
-    public void onDestroy() {
-        super.onDestroy();
-        if (samplingRunnable != null) {
-            handler.removeCallbacks(samplingRunnable);
-        }
-        if (wakeLock != null && wakeLock.isHeld()) {
-            wakeLock.release();
+        if (workExecutor != null && !workExecutor.isShutdown()) {
+            workExecutor.shutdown();
         }
         Log.i(TAG, "MonitorService destroyed");
     }

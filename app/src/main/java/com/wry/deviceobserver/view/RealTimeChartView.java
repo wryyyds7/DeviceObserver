@@ -8,7 +8,7 @@ import android.graphics.Path;
 import android.util.AttributeSet;
 import android.view.View;
 
-import java.util.LinkedList;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * 自定义 View：实时折线图
@@ -19,7 +19,7 @@ public class RealTimeChartView extends View {
     private static final int MAX_POINTS = 60;  // 最多 60 个采样点
     private static final int PADDING = 8;
 
-    private final LinkedList<Float> dataPoints = new LinkedList<>();
+    private final CopyOnWriteArrayList<Float> dataPoints = new CopyOnWriteArrayList<>();
     private final Paint linePaint;
     private final Paint fillPaint;
     private final Paint gridPaint;
@@ -62,9 +62,9 @@ public class RealTimeChartView extends View {
      * 添加一个新数据点
      */
     public void addPoint(float value) {
-        dataPoints.addLast(value);
+        dataPoints.add(value);
         if (dataPoints.size() > MAX_POINTS) {
-            dataPoints.removeFirst();
+            dataPoints.remove(0);
         }
         invalidate();
     }
@@ -137,7 +137,7 @@ public class RealTimeChartView extends View {
 
         // 当前值标签
         if (!dataPoints.isEmpty()) {
-            float current = dataPoints.getLast();
+            float current = dataPoints.get(dataPoints.size() - 1);
             String text = label + ": " + String.format("%.1f%%", current);
             canvas.drawText(text, PADDING, h - PADDING, textPaint);
         }

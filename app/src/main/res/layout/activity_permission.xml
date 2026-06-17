@@ -157,9 +157,8 @@
         <ListView
             android:id="@+id/lv_features"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="24dp"
-            android:layout_weight="0" />
+            android:layout_height="320dp"
+            android:layout_marginBottom="24dp" />
 
         <!-- 开始按钮 -->
         <Button

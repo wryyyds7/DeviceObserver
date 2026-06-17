@@ -51,12 +51,15 @@ public class PermissionActivity extends AppCompatActivity {
         btnStart = findViewById(R.id.btn_start);
         lvFeatures = findViewById(R.id.lv_features);
 
-        // 通知权限请求
+        // 通知权限请求（Android 13+ 才需要运行时申请）
+        Button btnNotification = findViewById(R.id.btn_grant_notification);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            findViewById(R.id.btn_grant_notification).setOnClickListener(v -> {
+            btnNotification.setOnClickListener(v -> {
                 notificationPermissionLauncher.launch(
                     android.Manifest.permission.POST_NOTIFICATIONS);
             });
+        } else {
+            btnNotification.setVisibility(android.view.View.GONE);
         }
 
         // 使用情况权限 → 跳设置页

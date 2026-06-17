@@ -33,7 +33,12 @@ public class ProcessMonitor {
             if (pidDirs == null) return processes;
 
             for (File pidDir : pidDirs) {
-                int pid = Integer.parseInt(pidDir.getName());
+                int pid;
+                try {
+                    pid = Integer.parseInt(pidDir.getName());
+                } catch (NumberFormatException e) {
+                    continue;
+                }
                 ProcessInfo info = readProcessInfo(pid);
                 if (info != null) {
                     processes.add(info);
