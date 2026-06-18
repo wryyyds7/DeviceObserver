@@ -10,18 +10,10 @@
     <!-- Usage stats (special permission, user must enable in Settings) -->
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
-    <!-- Wake lock for background sampling -->
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <!-- Internet access for network stats -->
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- Query all packages (Android 11+) -->
-    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
-        tools:ignore="ScopedStorage" />
 
     <application
         android:name=".DeviceObserverApp"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@drawable/ic_launcher_foreground"
         android:label="@string/app_name"
         android:supportsRtl="true"

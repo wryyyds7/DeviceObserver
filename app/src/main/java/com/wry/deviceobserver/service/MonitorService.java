@@ -63,7 +63,7 @@ public class MonitorService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         startForeground(NOTIFICATION_ID, createNotification("DeviceObserver 监控中..."));
         startSampling();
-        return START_STICKY;
+        return START_NOT_STICKY;
     }
 
     private void startSampling() {
