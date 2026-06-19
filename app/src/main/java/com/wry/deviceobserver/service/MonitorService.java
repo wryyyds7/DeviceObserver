@@ -127,7 +127,7 @@ public class MonitorService extends Service {
             record.cpuTemp = cpuTemp;
             record.netRxBytes = netRx;
             record.netTxBytes = netTx;
-            record.processCount = Runtime.getRuntime().availableProcessors();
+            record.processCount = 0;  // 进程数由 ProcessActivity 统计，Service 不计算
 
             AppDatabase.getInstance(this).sampleRecordDao().insert(record);
             // 清理 24h 前的旧数据

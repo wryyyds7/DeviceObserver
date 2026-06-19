@@ -70,7 +70,13 @@ public class ProcessMonitor {
         // 进程名 / 包名
         info.name = readFirstLine("/proc/" + pid + "/cmdline");
         if (info.name != null) {
-            info.name = info.name.replace('\0', ' ').trim();
+            // cmdline 以 \0 分隔参数，只取第一个之前的部分作为进程名
+            int nullIdx = info.name.indexOf('\0');
+            if (nullIdx > 0) {
+                info.name = info.name.substring(0, nullIdx);
+            } else {
+                info.name = info.name.trim();
+            }
         }
         if (info.name == null || info.name.isEmpty()) {
             info.name = readFirstLine("/proc/" + pid + "/comm");

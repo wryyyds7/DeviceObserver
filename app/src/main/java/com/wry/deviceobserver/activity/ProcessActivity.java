@@ -15,6 +15,8 @@ import com.wry.deviceobserver.permission.PermissionManager;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutorService;
 
 /**
  * 进程列表页：按内存降序展示所有进程
@@ -25,6 +27,7 @@ public class ProcessActivity extends AppCompatActivity {
     private ProcessAdapter adapter;
     private Handler handler;
     private Runnable samplingRunnable;
+    private ExecutorService scanExecutor;
 
     private static final int INTERVAL_MS = 2000;
 
@@ -38,8 +41,9 @@ public class ProcessActivity extends AppCompatActivity {
         adapter = new ProcessAdapter();
         recyclerView.setAdapter(adapter);
 
-        // 先初始化 handler，再启动子线程
+        // 先初始化 handler 和线程池，再启动子线程
         handler = new Handler(Looper.getMainLooper());
+        scanExecutor = Executors.newSingleThreadExecutor();
 
         // root 检测在子线程，使用 PermissionManager 缓存
         new Thread(() -> {
@@ -63,12 +67,12 @@ public class ProcessActivity extends AppCompatActivity {
     }
 
     private void refreshProcesses() {
-        new Thread(() -> {
+        scanExecutor.execute(() -> {
             List<ProcessMonitor.ProcessInfo> processes = processMonitor.scanAllProcesses();
             // 按内存降序排序
             Collections.sort(processes, (a, b) -> Long.compare(b.vmRssKb, a.vmRssKb));
             runOnUiThread(() -> adapter.setProcesses(processes));
-        }).start();
+        });
     }
 
     @Override
@@ -76,6 +80,9 @@ public class ProcessActivity extends AppCompatActivity {
         super.onDestroy();
         if (samplingRunnable != null) {
             handler.removeCallbacks(samplingRunnable);
+        }
+        if (scanExecutor != null && !scanExecutor.isShutdown()) {
+            scanExecutor.shutdown();
         }
     }
 }

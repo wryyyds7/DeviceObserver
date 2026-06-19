@@ -15,6 +15,8 @@ import com.wry.deviceobserver.service.MonitorService;
 import com.wry.deviceobserver.view.RealTimeChartView;
 
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutorService;
 
 /**
  * 主界面：实时展示系统性能指标
@@ -29,12 +31,13 @@ public class MainActivity extends AppCompatActivity {
     private Runnable samplingRunnable;
 
     // CPU 采样状态
-    private long[] prevCpuStat = null;
+    private volatile long[] prevCpuStat = null;
     // 前一次网络流量
     private long prevRxBytes = 0;
     private long prevTxBytes = 0;
 
     private static final int INTERVAL_MS = 1000;
+    private ExecutorService samplingExecutor;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -63,6 +66,7 @@ public class MainActivity extends AppCompatActivity {
         startForegroundService(serviceIntent);
 
         handler = new Handler(Looper.getMainLooper());
+        samplingExecutor = Executors.newSingleThreadExecutor();
         startSampling();
     }
 
@@ -78,8 +82,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void performSample() {
-        // 文件 I/O 移到子线程，避免阻塞 UI
-        new Thread(() -> {
+        // 文件 I/O 在固定线程池执行，避免每秒创建新线程
+        samplingExecutor.execute(() -> {
             // CPU
             long[] curStat = SystemMonitor.readCpuStat();
             float cpuUsage = 0;
@@ -146,7 +150,7 @@ public class MainActivity extends AppCompatActivity {
                 );
                 tvSummary.setText(summary);
             });
-        }).start();
+        });
     }
 
     private String formatBytes(long bytes) {
@@ -167,6 +171,9 @@ public class MainActivity extends AppCompatActivity {
         super.onDestroy();
         if (samplingRunnable != null) {
             handler.removeCallbacks(samplingRunnable);
+        }
+        if (samplingExecutor != null && !samplingExecutor.isShutdown()) {
+            samplingExecutor.shutdown();
         }
         // 停止前台服务
         stopService(new Intent(this, MonitorService.class));

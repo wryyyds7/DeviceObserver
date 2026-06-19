@@ -51,7 +51,21 @@ public class PermissionManager {
             java.io.BufferedReader reader = new java.io.BufferedReader(
                 new java.io.InputStreamReader(process.getInputStream()));
             String output = reader.readLine();
-            process.waitFor();
+
+            // 设置 3 秒超时，防止 root 弹窗用户不操作导致永久阻塞
+            long startTime = System.currentTimeMillis();
+            boolean finished = false;
+            while (System.currentTimeMillis() - startTime < 3000) {
+                finished = process.waitFor(100, java.util.concurrent.TimeUnit.MILLISECONDS);
+                if (finished) break;
+            }
+            if (!finished) {
+                process.destroyForcibly();
+                cachedRootResult = false;
+                cachedRootTimestamp = now;
+                return false;
+            }
+
             boolean result = output != null && output.contains("uid=0");
 
             cachedRootResult = result;
@@ -100,9 +114,10 @@ public class PermissionManager {
 
     /**
      * 根据当前权限状态确定功能等级
+     * 注意：此方法调用 isRootAvailable()，不要在主线程调用！
      */
     public PermissionLevel getPermissionLevel() {
-        boolean hasRoot = isRootAvailable();
+        boolean hasRoot = isRootAvailable();  // 使用缓存，不会每次 exec su
         boolean hasUsageStats = hasUsageStatsPermission();
         boolean hasNotification = hasNotificationPermission();
 
