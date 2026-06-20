@@ -33,8 +33,8 @@ public class MainActivity extends AppCompatActivity {
     // CPU 采样状态
     private volatile long[] prevCpuStat = null;
     // 前一次网络流量
-    private long prevRxBytes = 0;
-    private long prevTxBytes = 0;
+    private volatile long prevRxBytes = 0;
+    private volatile long prevTxBytes = 0;
 
     private static final int INTERVAL_MS = 1000;
     private ExecutorService samplingExecutor;

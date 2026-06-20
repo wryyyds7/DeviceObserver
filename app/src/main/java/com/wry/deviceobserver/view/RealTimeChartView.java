@@ -138,7 +138,9 @@ public class RealTimeChartView extends View {
         // 当前值标签
         if (!dataPoints.isEmpty()) {
             float current = dataPoints.get(dataPoints.size() - 1);
-            String text = label + ": " + String.format("%.1f%%", current);
+            // 温度用 °C，其他用 %
+            String unit = maxValue > 90 ? "°C" : "%";
+            String text = label + ": " + String.format("%.1f%s", current, unit);
             canvas.drawText(text, PADDING, h - PADDING, textPaint);
         }
     }

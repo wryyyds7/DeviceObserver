@@ -46,13 +46,13 @@ public class ProcessActivity extends AppCompatActivity {
         scanExecutor = Executors.newSingleThreadExecutor();
 
         // root 检测在子线程，使用 PermissionManager 缓存
-        new Thread(() -> {
+        scanExecutor.execute(() -> {
             boolean hasRoot = PermissionManager.isRootAvailable();
             runOnUiThread(() -> {
                 processMonitor = new ProcessMonitor(hasRoot);
                 startSampling();
             });
-        }).start();
+        });
     }
 
     private void startSampling() {

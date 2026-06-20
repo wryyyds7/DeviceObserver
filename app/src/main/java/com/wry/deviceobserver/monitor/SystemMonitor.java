@@ -44,10 +44,14 @@ public class SystemMonitor {
         if (prevStat == null || curStat == null || prevStat.length < 4 || curStat.length < 4) {
             return null;
         }
-        long prevIdle = prevStat[3];
-        long curIdle = curStat[3];
-        long prevTotal = prevStat[0] + prevStat[1] + prevStat[2] + prevStat[3];
-        long curTotal = curStat[0] + curStat[1] + curStat[2] + curStat[3];
+        // idle = idle + iowait (index 3 + 4)
+        long prevIdle = prevStat[3] + (prevStat.length > 4 ? prevStat[4] : 0);
+        long curIdle = curStat[3] + (curStat.length > 4 ? curStat[4] : 0);
+        // total = user + nice + system + idle + iowait + irq + softirq
+        long prevTotal = prevStat[0] + prevStat[1] + prevStat[2] + prevIdle
+            + (prevStat.length > 5 ? prevStat[5] + prevStat[6] : 0);
+        long curTotal = curStat[0] + curStat[1] + curStat[2] + curIdle
+            + (curStat.length > 5 ? curStat[5] + curStat[6] : 0);
         long totalDiff = curTotal - prevTotal;
         long idleDiff = curIdle - prevIdle;
         if (totalDiff == 0) return new float[]{0, 0};

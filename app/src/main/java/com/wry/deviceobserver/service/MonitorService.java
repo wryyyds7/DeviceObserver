@@ -40,7 +40,7 @@ public class MonitorService extends Service {
 
     private Handler handler;
     private Runnable samplingRunnable;
-    private boolean isForeground = true;
+    private volatile boolean isForeground = true;
 
     // 单线程池：采样 I/O + Room 写入
     private ExecutorService workExecutor;
