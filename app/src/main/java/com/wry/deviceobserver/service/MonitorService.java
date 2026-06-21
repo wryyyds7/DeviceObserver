@@ -129,10 +129,12 @@ public class MonitorService extends Service {
             record.netTxBytes = netTx;
             record.processCount = 0;  // 进程数由 ProcessActivity 统计，Service 不计算
 
-            AppDatabase.getInstance(this).sampleRecordDao().insert(record);
-            // 清理 24h 前的旧数据
-            AppDatabase.getInstance(this).sampleRecordDao()
-                .deleteBefore(now - 24 * 60 * 60 * 1000);
+            // 原子事务：插入新记录 + 清理旧数据
+            AppDatabase.getInstance(this).runInTransaction(() -> {
+                AppDatabase.getInstance(this).sampleRecordDao().insert(record);
+                AppDatabase.getInstance(this).sampleRecordDao()
+                    .deleteBefore(now - 24 * 60 * 60 * 1000);
+            });
         });
     }
 

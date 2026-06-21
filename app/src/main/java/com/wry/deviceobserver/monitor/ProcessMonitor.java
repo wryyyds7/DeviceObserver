@@ -83,14 +83,11 @@ public class ProcessMonitor {
             if (info.name == null) return null;
         }
 
-        // 内存：VmRSS + VmSwap
+        // 内存：VmRSS + VmSwap + Threads（从 /proc/[pid]/status 读取）
         readMemoryInfo(pid, info);
 
         // CPU：jiffies（需要两次采样计算）
         info.cpuJiffies = readCpuJiffies(pid);
-
-        // 线程数
-        info.threads = readThreadCount(pid);
 
         return info;
     }
@@ -147,12 +144,6 @@ public class ProcessMonitor {
         } catch (Exception e) {
             // ignore
         }
-    }
-
-    private int readThreadCount(int pid) {
-        File taskDir = new File("/proc/" + pid + "/task");
-        File[] threads = taskDir.listFiles();
-        return threads != null ? threads.length : 1;
     }
 
     private String readFirstLine(String path) {

@@ -27,6 +27,7 @@ public class RealTimeChartView extends View {
 
     private float maxValue = 100f;
     private String label = "CPU";
+    private String unit = "%";
     private int lineColor = Color.parseColor("#7C3AED");
 
     public RealTimeChartView(Context context) {
@@ -84,6 +85,10 @@ public class RealTimeChartView extends View {
         this.maxValue = max;
     }
 
+    public void setUnit(String unit) {
+        this.unit = unit;
+    }
+
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
@@ -138,8 +143,7 @@ public class RealTimeChartView extends View {
         // 当前值标签
         if (!dataPoints.isEmpty()) {
             float current = dataPoints.get(dataPoints.size() - 1);
-            // 温度用 °C，其他用 %
-            String unit = maxValue > 90 ? "°C" : "%";
+            // 使用显式设置的单位
             String text = label + ": " + String.format("%.1f%s", current, unit);
             canvas.drawText(text, PADDING, h - PADDING, textPaint);
         }

@@ -16,7 +16,9 @@ import com.wry.deviceobserver.view.RealTimeChartView;
 
 import java.util.List;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 主界面：实时展示系统性能指标
@@ -28,7 +30,6 @@ public class MainActivity extends AppCompatActivity {
     private RealTimeChartView chartTemp;
     private TextView tvSummary;
     private Handler handler;
-    private Runnable samplingRunnable;
 
     // CPU 采样状态
     private volatile long[] prevCpuStat = null;
@@ -37,7 +38,8 @@ public class MainActivity extends AppCompatActivity {
     private volatile long prevTxBytes = 0;
 
     private static final int INTERVAL_MS = 1000;
-    private ExecutorService samplingExecutor;
+    private ScheduledExecutorService samplingExecutor;
+    private final AtomicBoolean samplingInProgress = new AtomicBoolean(false);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -59,6 +61,7 @@ public class MainActivity extends AppCompatActivity {
 
         chartTemp.setLabel("Temp");
         chartTemp.setMaxValue(80f);
+        chartTemp.setUnit("°C");
         chartTemp.setLineColor(0xFFF59E0B);
 
         // 启动前台服务
@@ -66,90 +69,90 @@ public class MainActivity extends AppCompatActivity {
         startForegroundService(serviceIntent);
 
         handler = new Handler(Looper.getMainLooper());
-        samplingExecutor = Executors.newSingleThreadExecutor();
+        samplingExecutor = Executors.newSingleThreadScheduledExecutor();
         startSampling();
     }
 
     private void startSampling() {
-        samplingRunnable = new Runnable() {
-            @Override
-            public void run() {
-                performSample();
-                handler.postDelayed(this, INTERVAL_MS);
+        samplingExecutor.scheduleAtFixedRate(() -> {
+            // 防止采样任务堆积：如果上一次还在跑，跳过本次
+            if (!samplingInProgress.compareAndSet(false, true)) {
+                return;
             }
-        };
-        handler.post(samplingRunnable);
+            try {
+                performSample();
+            } finally {
+                samplingInProgress.set(false);
+            }
+        }, 0, INTERVAL_MS, TimeUnit.MILLISECONDS);
     }
 
     private void performSample() {
-        // 文件 I/O 在固定线程池执行，避免每秒创建新线程
-        samplingExecutor.execute(() -> {
-            // CPU
-            long[] curStat = SystemMonitor.readCpuStat();
-            float cpuUsage = 0;
-            if (prevCpuStat != null) {
-                float[] usage = SystemMonitor.getCpuUsageRate(prevCpuStat);
-                if (usage != null) cpuUsage = usage[1];
+        // CPU
+        long[] curStat = SystemMonitor.readCpuStat();
+        float cpuUsage = 0;
+        if (prevCpuStat != null) {
+            float[] usage = SystemMonitor.getCpuUsageRate(prevCpuStat);
+            if (usage != null) cpuUsage = usage[1];
+        }
+        prevCpuStat = curStat;
+
+        // 内存
+        long[] memInfo = SystemMonitor.getMemoryInfo();
+        long memTotal = memInfo[0];
+        long memAvailable = memInfo[2] > 0 ? memInfo[2] : memInfo[1];
+        float memUsagePct = memTotal > 0
+            ? (float) (memTotal - memAvailable) / memTotal * 100f
+            : 0;
+
+        // 温度
+        float cpuTemp = 0;
+        List<SystemMonitor.ThermalZone> zones = SystemMonitor.getThermalZones();
+        for (SystemMonitor.ThermalZone z : zones) {
+            if (z.type.contains("cpu") || z.type.contains("CPU")) {
+                cpuTemp = (float) z.tempCelsius;
+                break;
             }
-            prevCpuStat = curStat;
+        }
+        if (cpuTemp == 0 && !zones.isEmpty()) {
+            cpuTemp = (float) zones.get(0).tempCelsius;
+        }
 
-            // 内存
-            long[] memInfo = SystemMonitor.getMemoryInfo();
-            long memTotal = memInfo[0];
-            long memAvailable = memInfo[2] > 0 ? memInfo[2] : memInfo[1];
-            float memUsagePct = memTotal > 0
-                ? (float) (memTotal - memAvailable) / memTotal * 100f
-                : 0;
-
-            // 温度
-            float cpuTemp = 0;
-            List<SystemMonitor.ThermalZone> zones = SystemMonitor.getThermalZones();
-            for (SystemMonitor.ThermalZone z : zones) {
-                if (z.type.contains("cpu") || z.type.contains("CPU")) {
-                    cpuTemp = (float) z.tempCelsius;
-                    break;
-                }
+        // 网络流量（增量）
+        long netRx = 0, netTx = 0;
+        List<SystemMonitor.NetworkInterface> ifs = SystemMonitor.getNetworkInterfaces();
+        for (SystemMonitor.NetworkInterface ni : ifs) {
+            if (!ni.name.equals("lo")) {
+                netRx += ni.rxBytes;
+                netTx += ni.txBytes;
             }
-            if (cpuTemp == 0 && !zones.isEmpty()) {
-                cpuTemp = (float) zones.get(0).tempCelsius;
-            }
+        }
+        long rxRate = prevRxBytes > 0 ? (netRx - prevRxBytes) : 0;
+        long txRate = prevTxBytes > 0 ? (netTx - prevTxBytes) : 0;
+        prevRxBytes = netRx;
+        prevTxBytes = netTx;
 
-            // 网络流量（增量）
-            long netRx = 0, netTx = 0;
-            List<SystemMonitor.NetworkInterface> ifs = SystemMonitor.getNetworkInterfaces();
-            for (SystemMonitor.NetworkInterface ni : ifs) {
-                if (!ni.name.equals("lo")) {
-                    netRx += ni.rxBytes;
-                    netTx += ni.txBytes;
-                }
-            }
-            long rxRate = prevRxBytes > 0 ? (netRx - prevRxBytes) : 0;
-            long txRate = prevTxBytes > 0 ? (netTx - prevTxBytes) : 0;
-            prevRxBytes = netRx;
-            prevTxBytes = netTx;
+        // UI 更新回到主线程
+        final float finalCpuUsage = cpuUsage;
+        final float finalMemUsagePct = memUsagePct;
+        final float finalCpuTemp = cpuTemp;
+        final long finalTxRate = txRate;
+        final long finalRxRate = rxRate;
 
-            // UI 更新回到主线程
-            final float finalCpuUsage = cpuUsage;
-            final float finalMemUsagePct = memUsagePct;
-            final float finalCpuTemp = cpuTemp;
-            final long finalTxRate = txRate;
-            final long finalRxRate = rxRate;
+        runOnUiThread(() -> {
+            chartCpu.addPoint(finalCpuUsage);
+            chartMemory.addPoint(finalMemUsagePct);
+            chartTemp.addPoint(finalCpuTemp);
 
-            runOnUiThread(() -> {
-                chartCpu.addPoint(finalCpuUsage);
-                chartMemory.addPoint(finalMemUsagePct);
-                chartTemp.addPoint(finalCpuTemp);
-
-                String summary = String.format(
-                    "CPU: %.1f%%  |  Mem: %.1f%%  |  Temp: %.1f°C  |  ↑ %s  ↓ %s",
-                    finalCpuUsage,
-                    finalMemUsagePct,
-                    finalCpuTemp,
-                    formatBytes(finalTxRate),
-                    formatBytes(finalRxRate)
-                );
-                tvSummary.setText(summary);
-            });
+            String summary = String.format(
+                "CPU: %.1f%%  |  Mem: %.1f%%  |  Temp: %.1f°C  |  ↑ %s  ↓ %s",
+                finalCpuUsage,
+                finalMemUsagePct,
+                finalCpuTemp,
+                formatBytes(finalTxRate),
+                formatBytes(finalRxRate)
+            );
+            tvSummary.setText(summary);
         });
     }
 
@@ -169,11 +172,8 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (samplingRunnable != null) {
-            handler.removeCallbacks(samplingRunnable);
-        }
         if (samplingExecutor != null && !samplingExecutor.isShutdown()) {
-            samplingExecutor.shutdown();
+            samplingExecutor.shutdownNow();
         }
         // 停止前台服务
         stopService(new Intent(this, MonitorService.class));
