@@ -39,15 +39,18 @@ public class SystemMonitor {
      * @param prevStat 上一次的 /proc/stat 第一行数据
      * @return [0]=idle%, [1]=usage%，或 null 如果无法获取
      */
-    public static float[] getCpuUsageRate(long[] prevStat) {
-        long[] curStat = readCpuStat();
+    /**
+     * 计算两次 /proc/stat 采样之间的 CPU 使用率
+     * @param prevStat 上一次采样的 stat 数组
+     * @param curStat  本次采样的 stat 数组（由外部传入，避免内部重复读取）
+     * @return [0]=idle%, [1]=usage%，或 null 如果无法获取
+     */
+    public static float[] getCpuUsageRate(long[] prevStat, long[] curStat) {
         if (prevStat == null || curStat == null || prevStat.length < 4 || curStat.length < 4) {
             return null;
         }
-        // idle = idle + iowait (index 3 + 4)
         long prevIdle = prevStat[3] + (prevStat.length > 4 ? prevStat[4] : 0);
         long curIdle = curStat[3] + (curStat.length > 4 ? curStat[4] : 0);
-        // total = user + nice + system + idle + iowait + irq + softirq
         long prevTotal = prevStat[0] + prevStat[1] + prevStat[2] + prevIdle
             + (prevStat.length > 5 ? prevStat[5] + prevStat[6] : 0);
         long curTotal = curStat[0] + curStat[1] + curStat[2] + curIdle

@@ -118,7 +118,7 @@ public class RealTimeChartView extends View {
 
         for (int i = 0; i < dataPoints.size(); i++) {
             float x = PADDING + i * stepX;
-            float value = Math.min(dataPoints.get(i), maxValue);
+            float value = Math.max(0, Math.min(dataPoints.get(i), maxValue));
             float y = PADDING + chartH * (1 - value / maxValue);
 
             if (i == 0) {

@@ -15,6 +15,9 @@ import androidx.appcompat.app.AppCompatActivity;
 import com.wry.deviceobserver.R;
 import com.wry.deviceobserver.permission.PermissionManager;
 
+import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutorService;
+
 /**
  * 权限引导页：App 启动时按权限层级引导授权
  */
@@ -35,6 +38,8 @@ public class PermissionActivity extends AppCompatActivity {
         });
 
     private boolean cachedRoot = false;
+    private boolean rootCheckDone = false;  // root 检测是否完成
+    private ExecutorService rootExecutor;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -42,6 +47,7 @@ public class PermissionActivity extends AppCompatActivity {
         setContentView(R.layout.activity_permission);
 
         permissionManager = new PermissionManager(this);
+        rootExecutor = Executors.newSingleThreadExecutor();
 
         tvRootStatus = findViewById(R.id.tv_root_status);
         tvUsageStatsStatus = findViewById(R.id.tv_usage_stats_status);
@@ -73,11 +79,12 @@ public class PermissionActivity extends AppCompatActivity {
             finish();
         });
 
-        // root 检测：仅一次，子线程执行，结果缓存
-        new Thread(() -> {
+        // root 检测：仅一次，线程池执行，结果缓存
+        rootExecutor.execute(() -> {
             cachedRoot = PermissionManager.isRootAvailable();
+            rootCheckDone = true;
             runOnUiThread(this::updateStatus);
-        }).start();
+        });
     }
 
     @Override
@@ -87,8 +94,12 @@ public class PermissionActivity extends AppCompatActivity {
     }
 
     private void updateStatus() {
-        // root：使用缓存结果，不再重复 exec su
-        tvRootStatus.setText(cachedRoot ? "✅ 已授权" : "❌ 未授权（降级模式）");
+        // root：未检测完显示"检测中"，避免闪烁
+        if (!rootCheckDone) {
+            tvRootStatus.setText("检测中...");
+        } else {
+            tvRootStatus.setText(cachedRoot ? "✅ 已授权" : "❌ 未授权（降级模式）");
+        }
 
         // 使用情况
         boolean hasUsageStats = permissionManager.hasUsageStatsPermission();
@@ -99,8 +110,8 @@ public class PermissionActivity extends AppCompatActivity {
         boolean hasNotification = permissionManager.hasNotificationPermission();
         tvNotificationStatus.setText(hasNotification ? "✅ 已授权" : "❌ 未授权");
 
-        // 权限等级（使用缓存的 root 结果，不在主线程 exec su）
-        PermissionManager.PermissionLevel level = determineLevel();
+        // 权限等级（root 未检测完时显示 BASIC 避免闪烁）
+        PermissionManager.PermissionLevel level = rootCheckDone ? determineLevel() : PermissionManager.PermissionLevel.BASIC;
         String levelText;
         switch (level) {
             case FULL: levelText = "FULL — 全功能模式"; break;
@@ -115,6 +126,14 @@ public class PermissionActivity extends AppCompatActivity {
             android.R.layout.simple_list_item_1, features));
 
         btnStart.setEnabled(true);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (rootExecutor != null && !rootExecutor.isShutdown()) {
+            rootExecutor.shutdown();
+        }
     }
 
     /**

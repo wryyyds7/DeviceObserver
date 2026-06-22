@@ -91,8 +91,8 @@ public class MainActivity extends AppCompatActivity {
         // CPU
         long[] curStat = SystemMonitor.readCpuStat();
         float cpuUsage = 0;
-        if (prevCpuStat != null) {
-            float[] usage = SystemMonitor.getCpuUsageRate(prevCpuStat);
+        if (prevCpuStat != null && curStat != null) {
+            float[] usage = SystemMonitor.getCpuUsageRate(prevCpuStat, curStat);
             if (usage != null) cpuUsage = usage[1];
         }
         prevCpuStat = curStat;
@@ -106,7 +106,7 @@ public class MainActivity extends AppCompatActivity {
             : 0;
 
         // 温度
-        float cpuTemp = 0;
+        float cpuTemp = -1;  // 用 -1 表示未找到
         List<SystemMonitor.ThermalZone> zones = SystemMonitor.getThermalZones();
         for (SystemMonitor.ThermalZone z : zones) {
             if (z.type.contains("cpu") || z.type.contains("CPU")) {
@@ -114,9 +114,10 @@ public class MainActivity extends AppCompatActivity {
                 break;
             }
         }
-        if (cpuTemp == 0 && !zones.isEmpty()) {
+        if (cpuTemp < 0 && !zones.isEmpty()) {
             cpuTemp = (float) zones.get(0).tempCelsius;
         }
+        if (cpuTemp < 0) cpuTemp = 0;  // 全部失败时显示 0
 
         // 网络流量（增量）
         long netRx = 0, netTx = 0;
@@ -127,8 +128,8 @@ public class MainActivity extends AppCompatActivity {
                 netTx += ni.txBytes;
             }
         }
-        long rxRate = prevRxBytes > 0 ? (netRx - prevRxBytes) : 0;
-        long txRate = prevTxBytes > 0 ? (netTx - prevTxBytes) : 0;
+        long rxRate = (prevRxBytes > 0 && netRx >= prevRxBytes) ? (netRx - prevRxBytes) : 0;
+        long txRate = (prevTxBytes > 0 && netTx >= prevTxBytes) ? (netTx - prevTxBytes) : 0;
         prevRxBytes = netRx;
         prevTxBytes = netTx;
 

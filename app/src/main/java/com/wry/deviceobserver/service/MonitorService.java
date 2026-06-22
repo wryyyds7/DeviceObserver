@@ -22,14 +22,16 @@ import com.wry.deviceobserver.monitor.SystemMonitor;
 
 import java.util.List;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 前台服务：持续后台监控 + 数据持久化
  * - 采样频率自适应：前台 1s / 后台 5s
  * - 采样 I/O 在子线程执行，不阻塞主线程
- * - 采样数据写入 Room 数据库（单线程池）
+ * - AtomicBoolean 防止任务堆积
+ * - 采样数据写入 Room 数据库（事务）
  * - 不做 CPU 使用率计算（由 MainActivity 负责），仅持久化
  */
 public class MonitorService extends Service {
@@ -39,11 +41,11 @@ public class MonitorService extends Service {
     private static final int NOTIFICATION_ID = 1;
 
     private Handler handler;
-    private Runnable samplingRunnable;
     private volatile boolean isForeground = true;
 
-    // 单线程池：采样 I/O + Room 写入
-    private ExecutorService workExecutor;
+    // 定时调度 + I/O 执行共用单线程
+    private ScheduledExecutorService workExecutor;
+    private final AtomicBoolean samplingInProgress = new AtomicBoolean(false);
 
     // 采样间隔
     private static final long FOREGROUND_INTERVAL = 1000;  // 1s
@@ -55,7 +57,7 @@ public class MonitorService extends Service {
     public void onCreate() {
         super.onCreate();
         handler = new Handler(Looper.getMainLooper());
-        workExecutor = Executors.newSingleThreadExecutor();
+        workExecutor = Executors.newSingleThreadScheduledExecutor();
         createNotificationChannel();
     }
 
@@ -67,74 +69,77 @@ public class MonitorService extends Service {
     }
 
     private void startSampling() {
-        samplingRunnable = new Runnable() {
-            @Override
-            public void run() {
-                if (!running.get()) return;
-                performSample();
-                long interval = isForeground ? FOREGROUND_INTERVAL : BACKGROUND_INTERVAL;
-                handler.postDelayed(this, interval);
+        // 根据前台/后台状态选择间隔
+        long interval = isForeground ? FOREGROUND_INTERVAL : BACKGROUND_INTERVAL;
+        ((ScheduledExecutorService) workExecutor).scheduleAtFixedRate(() -> {
+            if (!running.get()) return;
+            // 防止采样任务堆积
+            if (!samplingInProgress.compareAndSet(false, true)) {
+                return;
             }
-        };
-        handler.post(samplingRunnable);
+            try {
+                performSample();
+            } finally {
+                samplingInProgress.set(false);
+            }
+        }, 0, interval, TimeUnit.MILLISECONDS);
     }
 
     /**
-     * 执行一次采样 —— I/O 在子线程执行，不阻塞主线程
+     * 执行一次采样 —— I/O 在 workExecutor 线程执行
      */
     private void performSample() {
-        workExecutor.execute(() -> {
-            long now = System.currentTimeMillis();
+        long now = System.currentTimeMillis();
 
-            // 内存
-            long[] memInfo = SystemMonitor.getMemoryInfo();
-            long memAvailable = memInfo[2] > 0 ? memInfo[2] : memInfo[1];
+        // 内存
+        long[] memInfo = SystemMonitor.getMemoryInfo();
+        long memAvailable = memInfo[2] > 0 ? memInfo[2] : memInfo[1];
 
-            // 温度
-            float cpuTemp = 0;
-            List<SystemMonitor.ThermalZone> zones = SystemMonitor.getThermalZones();
-            for (SystemMonitor.ThermalZone z : zones) {
-                if (z.type.contains("cpu") || z.type.contains("CPU")) {
-                    cpuTemp = (float) z.tempCelsius;
-                    break;
-                }
+        // 温度
+        float cpuTemp = -1;
+        List<SystemMonitor.ThermalZone> zones = SystemMonitor.getThermalZones();
+        for (SystemMonitor.ThermalZone z : zones) {
+            if (z.type.contains("cpu") || z.type.contains("CPU")) {
+                cpuTemp = (float) z.tempCelsius;
+                break;
             }
-            if (cpuTemp == 0 && !zones.isEmpty()) {
-                cpuTemp = (float) zones.get(0).tempCelsius;
+        }
+        if (cpuTemp < 0 && !zones.isEmpty()) {
+            cpuTemp = (float) zones.get(0).tempCelsius;
+        }
+        if (cpuTemp < 0) cpuTemp = 0;
+
+        // 网络流量
+        long netRx = 0, netTx = 0;
+        List<SystemMonitor.NetworkInterface> netIfs = SystemMonitor.getNetworkInterfaces();
+        for (SystemMonitor.NetworkInterface ni : netIfs) {
+            if (!ni.name.equals("lo")) {
+                netRx += ni.rxBytes;
+                netTx += ni.txBytes;
             }
+        }
 
-            // 网络流量
-            long netRx = 0, netTx = 0;
-            List<SystemMonitor.NetworkInterface> netIfs = SystemMonitor.getNetworkInterfaces();
-            for (SystemMonitor.NetworkInterface ni : netIfs) {
-                if (!ni.name.equals("lo")) {
-                    netRx += ni.rxBytes;
-                    netTx += ni.txBytes;
-                }
-            }
+        // 温度告警（回主线程更新通知）
+        if (cpuTemp > 60) {
+            final float alertTemp = cpuTemp;
+            handler.post(() -> updateNotification("⚠ 温度告警: "
+                + String.format("%.1f", alertTemp) + "°C"));
+        }
 
-            // 温度告警
-            if (cpuTemp > 60) {
-                handler.post(() -> updateNotification("⚠ 温度告警: "
-                    + String.format("%.1f", cpuTemp) + "°C"));
-            }
+        // 持久化到 Room（事务）
+        SampleRecord record = new SampleRecord();
+        record.timestamp = now;
+        record.cpuUsage = 0;
+        record.memAvailableKb = memAvailable;
+        record.cpuTemp = cpuTemp;
+        record.netRxBytes = netRx;
+        record.netTxBytes = netTx;
+        record.processCount = 0;
 
-            // 持久化到 Room
-            SampleRecord record = new SampleRecord();
-            record.timestamp = now;
-            record.cpuUsage = 0;  // CPU 使用率由 MainActivity 计算，Service 仅持久化
-            record.memAvailableKb = memAvailable;
-            record.cpuTemp = cpuTemp;
-            record.netRxBytes = netRx;
-            record.netTxBytes = netTx;
-            record.processCount = 0;  // 进程数由 ProcessActivity 统计，Service 不计算
-
-            // 原子事务：插入新记录 + 清理旧数据
-            AppDatabase.getInstance(this).runInTransaction(() -> {
-                AppDatabase.getInstance(this).sampleRecordDao().insert(record);
-                AppDatabase.getInstance(this).sampleRecordDao()
-                    .deleteBefore(now - 24 * 60 * 60 * 1000);
-            });
+        AppDatabase.getInstance(this).runInTransaction(() -> {
+            AppDatabase.getInstance(this).sampleRecordDao().insert(record);
+            AppDatabase.getInstance(this).sampleRecordDao()
+                .deleteBefore(now - 24 * 60 * 60 * 1000);
         });
     }
 
@@ -187,11 +192,8 @@ public class MonitorService extends Service {
     public void onDestroy() {
         super.onDestroy();
         running.set(false);
-        if (samplingRunnable != null) {
-            handler.removeCallbacks(samplingRunnable);
-        }
         if (workExecutor != null && !workExecutor.isShutdown()) {
-            workExecutor.shutdown();
+            workExecutor.shutdownNow();
         }
         Log.i(TAG, "MonitorService destroyed");
     }
