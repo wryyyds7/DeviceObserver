@@ -35,11 +35,6 @@ public class SystemMonitor {
     }
 
     /**
-     * 获取 CPU 总体使用率（通过 /proc/stat 两次采样计算）
-     * @param prevStat 上一次的 /proc/stat 第一行数据
-     * @return [0]=idle%, [1]=usage%，或 null 如果无法获取
-     */
-    /**
      * 计算两次 /proc/stat 采样之间的 CPU 使用率
      * @param prevStat 上一次采样的 stat 数组
      * @param curStat  本次采样的 stat 数组（由外部传入，避免内部重复读取）

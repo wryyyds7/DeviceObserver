@@ -1,8 +1,6 @@
 package com.wry.deviceobserver.activity;
 
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
 
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.recyclerview.widget.LinearLayoutManager;
@@ -27,7 +25,6 @@ public class ProcessActivity extends AppCompatActivity {
 
     private ProcessMonitor processMonitor;
     private ProcessAdapter adapter;
-    private Handler handler;
     private ScheduledExecutorService scanExecutor;
     private final AtomicBoolean scanning = new AtomicBoolean(false);
     private boolean initialized = false;
@@ -44,7 +41,6 @@ public class ProcessActivity extends AppCompatActivity {
         adapter = new ProcessAdapter();
         recyclerView.setAdapter(adapter);
 
-        handler = new Handler(Looper.getMainLooper());
         scanExecutor = Executors.newSingleThreadScheduledExecutor();
 
         // root 检测在子线程，使用 PermissionManager 缓存

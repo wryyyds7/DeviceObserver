@@ -83,7 +83,9 @@ public class PermissionActivity extends AppCompatActivity {
         rootExecutor.execute(() -> {
             cachedRoot = PermissionManager.isRootAvailable();
             rootCheckDone = true;
-            runOnUiThread(this::updateStatus);
+            if (!isFinishing() && !isDestroyed()) {
+                runOnUiThread(this::updateStatus);
+            }
         });
     }
 

@@ -71,7 +71,7 @@ public class MonitorService extends Service {
     private void startSampling() {
         // 根据前台/后台状态选择间隔
         long interval = isForeground ? FOREGROUND_INTERVAL : BACKGROUND_INTERVAL;
-        ((ScheduledExecutorService) workExecutor).scheduleAtFixedRate(() -> {
+        workExecutor.scheduleAtFixedRate(() -> {
             if (!running.get()) return;
             // 防止采样任务堆积
             if (!samplingInProgress.compareAndSet(false, true)) {
@@ -83,6 +83,19 @@ public class MonitorService extends Service {
                 samplingInProgress.set(false);
             }
         }, 0, interval, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * 重新调度采样（前后台切换时调用）
+     */
+    private void rescheduleSampling() {
+        // 取消现有定时任务（shutdownNow 会中断正在执行的任务）
+        if (workExecutor != null && !workExecutor.isShutdown()) {
+            workExecutor.shutdownNow();
+        }
+        workExecutor = Executors.newSingleThreadScheduledExecutor();
+        running.set(true);
+        startSampling();
     }
 
     /**
@@ -186,6 +199,7 @@ public class MonitorService extends Service {
     public void onTaskRemoved(Intent rootIntent) {
         super.onTaskRemoved(rootIntent);
         isForeground = false;
+        rescheduleSampling();  // 切换到后台 5 秒间隔
     }
 
     @Override

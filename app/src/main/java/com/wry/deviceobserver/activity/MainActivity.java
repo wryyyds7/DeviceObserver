@@ -2,8 +2,6 @@ package com.wry.deviceobserver.activity;
 
 import android.content.Intent;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
 import android.view.View;
 import android.widget.TextView;
 
@@ -29,7 +27,6 @@ public class MainActivity extends AppCompatActivity {
     private RealTimeChartView chartMemory;
     private RealTimeChartView chartTemp;
     private TextView tvSummary;
-    private Handler handler;
 
     // CPU 采样状态
     private volatile long[] prevCpuStat = null;
@@ -68,7 +65,6 @@ public class MainActivity extends AppCompatActivity {
         Intent serviceIntent = new Intent(this, MonitorService.class);
         startForegroundService(serviceIntent);
 
-        handler = new Handler(Looper.getMainLooper());
         samplingExecutor = Executors.newSingleThreadScheduledExecutor();
         startSampling();
     }
@@ -140,21 +136,23 @@ public class MainActivity extends AppCompatActivity {
         final long finalTxRate = txRate;
         final long finalRxRate = rxRate;
 
-        runOnUiThread(() -> {
-            chartCpu.addPoint(finalCpuUsage);
-            chartMemory.addPoint(finalMemUsagePct);
-            chartTemp.addPoint(finalCpuTemp);
+        if (!isFinishing() && !isDestroyed()) {
+            runOnUiThread(() -> {
+                chartCpu.addPoint(finalCpuUsage);
+                chartMemory.addPoint(finalMemUsagePct);
+                chartTemp.addPoint(finalCpuTemp);
 
-            String summary = String.format(
-                "CPU: %.1f%%  |  Mem: %.1f%%  |  Temp: %.1f°C  |  ↑ %s  ↓ %s",
-                finalCpuUsage,
-                finalMemUsagePct,
-                finalCpuTemp,
-                formatBytes(finalTxRate),
-                formatBytes(finalRxRate)
-            );
-            tvSummary.setText(summary);
-        });
+                String summary = String.format(
+                    "CPU: %.1f%%  |  Mem: %.1f%%  |  Temp: %.1f°C  |  ↑ %s  ↓ %s",
+                    finalCpuUsage,
+                    finalMemUsagePct,
+                    finalCpuTemp,
+                    formatBytes(finalTxRate),
+                    formatBytes(finalRxRate)
+                );
+                tvSummary.setText(summary);
+            });
+        }
     }
 
     private String formatBytes(long bytes) {
