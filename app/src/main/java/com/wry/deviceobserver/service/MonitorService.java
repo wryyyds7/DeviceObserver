@@ -89,12 +89,13 @@ public class MonitorService extends Service {
      * 重新调度采样（前后台切换时调用）
      */
     private void rescheduleSampling() {
-        // 取消现有定时任务（shutdownNow 会中断正在执行的任务）
+        // 用 shutdown() 而非 shutdownNow()，让正在执行的采样完成（避免中断 Room 事务）
         if (workExecutor != null && !workExecutor.isShutdown()) {
-            workExecutor.shutdownNow();
+            workExecutor.shutdown();
         }
         workExecutor = Executors.newSingleThreadScheduledExecutor();
         running.set(true);
+        samplingInProgress.set(false);  // 重置防堆积标志
         startSampling();
     }
 

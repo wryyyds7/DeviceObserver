@@ -46,11 +46,13 @@ public class ProcessActivity extends AppCompatActivity {
         // root 检测在子线程，使用 PermissionManager 缓存
         scanExecutor.execute(() -> {
             boolean hasRoot = PermissionManager.isRootAvailable();
-            runOnUiThread(() -> {
-                processMonitor = new ProcessMonitor(hasRoot);
-                initialized = true;
-                startSampling();
-            });
+            if (!isFinishing() && !isDestroyed()) {
+                runOnUiThread(() -> {
+                    processMonitor = new ProcessMonitor(hasRoot);
+                    initialized = true;
+                    startSampling();
+                });
+            }
         });
     }
 
@@ -62,7 +64,9 @@ public class ProcessActivity extends AppCompatActivity {
             try {
                 List<ProcessMonitor.ProcessInfo> processes = processMonitor.scanAllProcesses();
                 Collections.sort(processes, (a, b) -> Long.compare(b.vmRssKb, a.vmRssKb));
-                runOnUiThread(() -> adapter.setProcesses(processes));
+                if (!isFinishing() && !isDestroyed()) {
+                    runOnUiThread(() -> adapter.setProcesses(processes));
+                }
             } finally {
                 scanning.set(false);
             }
