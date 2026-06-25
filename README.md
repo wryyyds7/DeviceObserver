@@ -1,6 +1,6 @@
 # DeviceObserver — Android 系统性能与应用资源监控工具
 
-基于 Java 的 Android 系统性能监控工具，通过读取 `/proc`、`/sys` 系统文件实时获取 CPU、内存、温度、网络流量等硬件指标，root 下可监控全部进程资源占用并杀除后台进程，非 root 降级为设备级监控。
+基于 Java 的 Android 系统性能监控工具，通过读取 `/proc`、`/sys` 系统文件实时获取 CPU、内存、温度、网络流量等硬件指标，root 下可监控全部进程资源占用并标记内存泄漏嫌疑进程，非 root 降级为设备级监控。
 
 ## 功能概览
 
@@ -12,8 +12,7 @@
 | CPU/电池温度 | ✅ | ✅ | `/sys/class/thermal/thermal_zone*/temp` |
 | 网络流量统计 | ✅ | ✅ | `/proc/net/dev` |
 | 全进程列表 + 内存/CPU | ❌ | ✅ | `/proc/[pid]/status` + `/proc/[pid]/stat` |
-| 进程内存泄漏嫌疑标记 | ❌ | ✅ | 连续 3 次 PSS 增长 >10MB |
-| 杀除后台进程 | ❌ | ✅ | root shell `kill` |
+| 进程内存泄漏嫌疑标记 | ❌ | ✅ | 连续 3 次 VmRSS 增长 >10MB |
 | 24h 历史数据回溯 | ✅ | ✅ | Room 数据库持久化 |
 | 温度超阈值告警通知 | ✅ | ✅ | NotificationManager |
 
@@ -26,18 +25,19 @@
 │   │ Permission   │  │   Main       │                 │
 │   │ Activity     │  │   Activity   │                 │
 │   │ (权限引导)    │  │ (实时图表)   │                 │
-│   └──────────────┘  └──────────────┘                │
-│                      │                               │
-│   ┌──────────────────┴───────────┐                  │
-│   │     ProcessActivity          │                  │
-│   │     (进程列表 + RecyclerView) │                  │
-│   └──────────────────────────────┘                  │
+│   └──────────────┘  └──────┬───────┘                │
+│                             │ 广播接收                 │
+│   ┌──────────────────┴────┐                         │
+│   │   ProcessActivity      │                         │
+│   │   (进程列表+RecyclerView)│                       │
+│   └────────────────────────┘                        │
 ├──────────────────────────────────────────────────────┤
 │                Service Layer                           │
 │   ┌──────────────────────────────────┐               │
 │   │  MonitorService (Foreground)     │               │
+│   │  唯一采样源 + 广播分发             │               │
 │   │  采样频率自适应 (1s/5s)           │               │
-│   │  WakeLock 按需持有                 │               │
+│   │  ScheduledExecutorService         │               │
 │   └──────────────┬───────────────────┘               │
 │                  │ 采样数据                            │
 ├──────────────────┼───────────────────────────────────┤
@@ -47,8 +47,8 @@
 │   │  (CPU/Mem/Temp/Net)            │                  │
 │   └───────────────┬───────────────┘                  │
 │   ┌───────────────┴───────────────┐                  │
-│   │  ProcessMonitor               │                  │
-│   │  (root: /proc 遍历)            │                  │
+│   │  ProcessMonitor                │                  │
+│   │  (root: /proc 遍历 + 泄漏检测)  │                  │
 │   └───────────────────────────────┘                  │
 ├──────────────────────────────────────────────────────┤
 │               Data Layer                               │
@@ -58,6 +58,14 @@
 │   └──────────────┘  └──────────────┘                 │
 └──────────────────────────────────────────────────────┘
 ```
+
+### 采样架构
+
+MonitorService 是**唯一采样源**：
+- 每秒（前台）或每 5 秒（后台）执行一次采样
+- 采样结果通过 `BroadcastReceiver` 广播给 MainActivity 用于 UI 展示
+- 同时写入 Room 数据库用于 24h 历史回溯
+- MainActivity 不自己采样，不在 onDestroy 停止 Service
 
 ## 分层权限架构
 
@@ -76,7 +84,7 @@ App 启动 → 权限引导页
   │
   └── 3. Root 权限（Magisk/KernelSU 弹窗）
       └── su -c "id"
-          授权 → FULL 模式：全进程监控 + 杀进程
+          授权 → FULL 模式：全进程监控 + 泄漏检测
           拒绝 → BASIC 模式：仅系统硬件指标
 ```
 
@@ -96,7 +104,7 @@ App 启动 → 权限引导页
 | UI | XML 布局 + RecyclerView | 传统 Android View 体系 |
 | 图表 | 自定义 View (Canvas) | 不依赖第三方图表库 |
 | 后台 | Foreground Service | 前台服务保活 + 通知 |
-| 调度 | WorkManager | 后台定时采样 |
+| 调度 | ScheduledExecutorService | 定时采样 + AtomicBoolean 防堆积 |
 | 持久化 | Room | 历史数据 24h 存储与回溯 |
 | 异步 | RxJava 3 | Room 响应式查询 |
 | 权限 | ActivityResult API | 运行时权限请求 |
@@ -111,13 +119,13 @@ DeviceObserver/
 │   │   ├── DeviceObserverApp.java         # Application 入口
 │   │   ├── activity/
 │   │   │   ├── PermissionActivity.java     # 权限引导页
-│   │   │   ├── MainActivity.java           # 主界面（实时图表）
+│   │   │   ├── MainActivity.java           # 主界面（接收广播 + 实时图表）
 │   │   │   └── ProcessActivity.java        # 进程列表页
 │   │   ├── service/
-│   │   │   └── MonitorService.java          # 前台服务
+│   │   │   └── MonitorService.java          # 前台服务（唯一采样源）
 │   │   ├── monitor/
 │   │   │   ├── SystemMonitor.java           # 系统硬件监控
-│   │   │   └── ProcessMonitor.java          # 进程监控
+│   │   │   └── ProcessMonitor.java          # 进程监控 + 内存泄漏检测
 │   │   ├── permission/
 │   │   │   └── PermissionManager.java       # 分层权限管理
 │   │   ├── view/
@@ -125,7 +133,6 @@ DeviceObserver/
 │   │   ├── adapter/
 │   │   │   └── ProcessAdapter.java          # 进程列表 Adapter
 │   │   ├── model/
-│   │   │   ├── SampleData.java               # 采样数据快照
 │   │   │   └── SampleRecord.java            # Room 实体
 │   │   ├── dao/
 │   │   │   └── SampleRecordDao.java          # Room DAO
@@ -142,84 +149,85 @@ DeviceObserver/
 │           └── themes.xml
 ├── build.gradle
 ├── settings.gradle
-└── Makefile
+├── gradlew
+├── gradlew.bat
+└── gradle/wrapper/
+    ├── gradle-wrapper.jar
+    └── gradle-wrapper.properties
 ```
 
 ## 核心实现
 
-### 1. 系统硬件监控 — /sys + /proc 文件读取
+### 1. 统一采样架构 — Service 唯一采样源
 
 ```java
-// CPU 频率：遍历各核心
-public static List<Integer> getCpuCoreFrequencies() {
-    int cores = Runtime.getRuntime().availableProcessors();
-    List<Integer> freqs = new ArrayList<>();
-    for (int i = 0; i < cores; i++) {
-        String path = "/sys/devices/system/cpu/cpu" + i + "/cpufreq/scaling_cur_freq";
-        int freq = readIntFromFile(path);
-        if (freq < 0) freq = readCpuFreqFromProc(i);  // 降级
-        freqs.add(freq);
+// MonitorService: 唯一采样源，通过广播分发数据
+private void performSample() {
+    // CPU 使用率计算
+    float cpuUsage = SystemMonitor.getCpuUsageRate(prevCpuStat, curStat);
+
+    // 广播给 UI
+    Intent sampleIntent = new Intent(ACTION_SAMPLE);
+    sampleIntent.putExtra(EXTRA_CPU_USAGE, cpuUsage);
+    sendBroadcast(sampleIntent);
+
+    // 持久化到 Room（事务）
+    AppDatabase.getInstance(this).runInTransaction(() -> {
+        sampleRecordDao().insert(record);
+        sampleRecordDao().deleteBefore(now - 24h);
+    });
+}
+
+// MainActivity: 只接收广播，不自己采样
+private class SampleReceiver extends BroadcastReceiver {
+    public void onReceive(Context context, Intent intent) {
+        float cpuUsage = intent.getFloatExtra(EXTRA_CPU_USAGE, 0);
+        chartCpu.addPoint(cpuUsage);
     }
-    return freqs;
-}
-
-// CPU 使用率：/proc/stat 两次采样
-public static float[] getCpuUsageRate(long[] prevStat) {
-    long[] curStat = readCpuStat();
-    long totalDiff = curTotal - prevTotal;
-    long idleDiff = curIdle - prevIdle;
-    float usageRate = 100f - (float) idleDiff / totalDiff * 100f;
-    return new float[]{idleRate, usageRate};
 }
 ```
 
-### 2. 全进程监控 — /proc 遍历
+### 2. 内存泄漏嫌疑检测
 
 ```java
-// root 下遍历 /proc 目录所有数字子目录
-File[] pidDirs = new File("/proc").listFiles((dir, name) -> name.matches("\\d+"));
-for (File pidDir : pidDirs) {
-    int pid = Integer.parseInt(pidDir.getName());
-    // 进程名：/proc/[pid]/cmdline
-    // 内存：/proc/[pid]/status → VmRSS, VmSwap
-    // CPU：/proc/[pid]/stat → utime, stime (jiffies)
+// 连续 3 次 VmRSS 增长 > 10MB 标记为嫌疑
+private void checkMemoryLeak(int pid, long currentRssKb, ProcessInfo info) {
+    long[] history = pidRssHistory.get(pid);
+    // 滑动窗口记录最近 3 次采样
+    boolean allIncreasing = true;
+    for (int i = 1; i < 3; i++) {
+        if (history[i] - history[i-1] < 10 * 1024) allIncreasing = false;
+    }
+    info.suspicious = allIncreasing;
 }
 ```
 
-### 3. SoC 厂商适配
+### 3. 前台服务保活 + 自适应采样频率
 
 ```java
-// 温度：高通/联发科/三星路径差异，遍历 thermal_zone 降级
-File[] zoneDirs = new File("/sys/class/thermal")
-    .listFiles((dir, name) -> name.startsWith("thermal_zone"));
-for (File zone : zoneDirs) {
-    String type = readFile(zone + "/type");  // "cpu_thermal" / "mtktscpu" 等
-    double temp = readInt(zone + "/temp") / 1000.0;
-}
-```
-
-### 4. 前台服务保活
-
-```java
-// Foreground Service + 采样频率自适应
+// Foreground Service + ScheduledExecutorService
 @Override
 public int onStartCommand(Intent intent, int flags, int startId) {
     startForeground(NOTIFICATION_ID, createNotification("监控中..."));
-    startSampling();  // 前台 1s / 后台 5s
-    return START_STICKY;
+    // 处理前台/后台切换
+    if (intent.hasExtra("foreground")) {
+        isForeground = intent.getBooleanExtra("foreground", true);
+        rescheduleSampling();  // 重新调度：前台 1s / 后台 5s
+    }
+    return START_NOT_STICKY;
 }
 ```
 
-### 5. 自定义 View 实时折线图
+### 4. 自定义 View 实时折线图
 
 ```java
-// Canvas drawPath 绘制 60fps 实时曲线
+// Canvas drawPath + CopyOnWriteArrayList 线程安全
 @Override
 protected void onDraw(Canvas canvas) {
     float stepX = chartW / (MAX_POINTS - 1);
     Path linePath = new Path();
     for (int i = 0; i < dataPoints.size(); i++) {
-        float x = PADDING + i * stepX;
+        float value = Math.max(0, Math.min(dataPoints.get(i), maxValue));
         float y = PADDING + chartH * (1 - value / maxValue);
         if (i == 0) linePath.moveTo(x, y);
         else linePath.lineTo(x, y);
@@ -228,7 +236,7 @@ protected void onDraw(Canvas canvas) {
 }
 ```
 
-### 6. Room 历史持久化
+### 5. Room 历史持久化
 
 ```java
 @Entity(tableName = "sample_records")
@@ -240,9 +248,11 @@ public class SampleRecord {
     public float cpuTemp;
 }
 
-// DAO: 查询 24h 数据
-@Query("SELECT * FROM sample_records WHERE timestamp > :since ORDER BY timestamp ASC")
-Flowable<List<SampleRecord>> getRecordsSince(long since);
+// 事务写入：insert + 清理 24h 前旧数据
+AppDatabase.getInstance(this).runInTransaction(() -> {
+    sampleRecordDao().insert(record);
+    sampleRecordDao().deleteBefore(now - 24h);
+});
 ```
 
 ## 快速开始
@@ -259,7 +269,7 @@ Flowable<List<SampleRecord>> getRecordsSince(long since);
 ### 编译
 
 ```bash
-# 使用 Gradle 编译
+# 使用 Gradle Wrapper 编译
 ./gradlew assembleDebug
 
 # 生成 APK 位置

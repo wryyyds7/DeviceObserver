@@ -43,10 +43,17 @@ public class PermissionManager {
 
         try {
             Process process = Runtime.getRuntime().exec(new String[]{"su", "-c", "id"});
-            // 消费 stderr 防止 waitFor 阻塞
+
+            // 在单独线程消费 stderr，防止 read 阻塞主检测流程
             java.io.InputStream stderr = process.getErrorStream();
-            byte[] buffer = new byte[1024];
-            while (stderr.read(buffer) != -1) { /* drain */ }
+            Thread stderrDrain = new Thread(() -> {
+                try {
+                    byte[] buffer = new byte[1024];
+                    while (stderr.read(buffer) != -1) { /* drain */ }
+                } catch (Exception ignored) {}
+            }, "stderr-drain");
+            stderrDrain.setDaemon(true);
+            stderrDrain.start();
 
             java.io.BufferedReader reader = new java.io.BufferedReader(
                 new java.io.InputStreamReader(process.getInputStream()));

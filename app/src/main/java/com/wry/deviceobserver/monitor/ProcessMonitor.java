@@ -4,7 +4,9 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 进程监控：root 下遍历 /proc/[pid]/ 获取所有进程的 CPU、内存、网络信息。
@@ -13,6 +15,10 @@ import java.util.List;
 public class ProcessMonitor {
 
     private final boolean isRoot;
+    // PID → 历次 VmRSS 记录，用于检测内存泄漏
+    private final Map<Integer, long[]> pidRssHistory = new HashMap<>();
+    private static final int LEAK_CHECK_COUNT = 3;       // 连续 N 次
+    private static final long LEAK_THRESHOLD_KB = 10 * 1024; // 每次增长 > 10MB
 
     public ProcessMonitor(boolean isRoot) {
         this.isRoot = isRoot;
@@ -89,6 +95,9 @@ public class ProcessMonitor {
         // CPU：jiffies（需要两次采样计算）
         info.cpuJiffies = readCpuJiffies(pid);
 
+        // 内存泄漏嫌疑检测：连续 3 次 PSS 增长 > 10MB
+        checkMemoryLeak(pid, info.vmRssKb, info);
+
         return info;
     }
 
@@ -144,6 +153,34 @@ public class ProcessMonitor {
         } catch (Exception e) {
             // ignore
         }
+    }
+
+    /**
+     * 检测内存泄漏嫌疑：连续 3 次 VmRSS 增长 > 10MB
+     */
+    private void checkMemoryLeak(int pid, long currentRssKb, ProcessInfo info) {
+        long[] history = pidRssHistory.get(pid);
+        if (history == null) {
+            history = new long[LEAK_CHECK_COUNT];
+            history[0] = currentRssKb;
+            pidRssHistory.put(pid, history);
+            return;
+        }
+
+        // 左移历史，填入新值
+        System.arraycopy(history, 1, history, 0, LEAK_CHECK_COUNT - 1);
+        history[LEAK_CHECK_COUNT - 1] = currentRssKb;
+        pidRssHistory.put(pid, history);
+
+        // 检查是否连续 3 次增长 > 10MB
+        boolean allIncreasing = true;
+        for (int i = 1; i < LEAK_CHECK_COUNT; i++) {
+            if (history[i] - history[i - 1] < LEAK_THRESHOLD_KB) {
+                allIncreasing = false;
+                break;
+            }
+        }
+        info.suspicious = allIncreasing && history[0] > 0;
     }
 
     private String readFirstLine(String path) {

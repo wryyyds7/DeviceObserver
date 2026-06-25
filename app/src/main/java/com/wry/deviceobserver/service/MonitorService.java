@@ -27,31 +27,41 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * 前台服务：持续后台监控 + 数据持久化
+ * 前台服务：唯一采样源 + 后台持久化
  * - 采样频率自适应：前台 1s / 后台 5s
- * - 采样 I/O 在子线程执行，不阻塞主线程
- * - AtomicBoolean 防止任务堆积
+ * - 采样结果通过广播发送给 MainActivity
  * - 采样数据写入 Room 数据库（事务）
- * - 不做 CPU 使用率计算（由 MainActivity 负责），仅持久化
+ * - CPU 使用率由 Service 统一计算，MainActivity 只负责展示
  */
 public class MonitorService extends Service {
+
+    public static final String ACTION_SAMPLE = "com.wry.deviceobserver.SAMPLE";
+    public static final String EXTRA_CPU_USAGE = "cpu_usage";
+    public static final String EXTRA_MEM_USAGE = "mem_usage";
+    public static final String EXTRA_CPU_TEMP = "cpu_temp";
+    public static final String EXTRA_NET_RX = "net_rx";
+    public static final String EXTRA_NET_TX = "net_tx";
 
     private static final String TAG = "MonitorService";
     private static final String CHANNEL_ID = "monitor_channel";
     private static final int NOTIFICATION_ID = 1;
+    private static final float TEMP_ALERT_THRESHOLD = 60f;
 
     private Handler handler;
     private volatile boolean isForeground = true;
-
-    // 定时调度 + I/O 执行共用单线程
     private ScheduledExecutorService workExecutor;
     private final AtomicBoolean samplingInProgress = new AtomicBoolean(false);
-
-    // 采样间隔
-    private static final long FOREGROUND_INTERVAL = 1000;  // 1s
-    private static final long BACKGROUND_INTERVAL = 5000;  // 5s
-
     private final AtomicBoolean running = new AtomicBoolean(true);
+    private final AtomicBoolean samplingRunnableStarted = new AtomicBoolean(false);
+
+    private static final long FOREGROUND_INTERVAL = 1000;
+    private static final long BACKGROUND_INTERVAL = 5000;
+
+    // CPU 采样状态
+    private long[] prevCpuStat = null;
+    // 前一次网络流量
+    private long prevRxBytes = 0;
+    private long prevTxBytes = 0;
 
     @Override
     public void onCreate() {
@@ -64,19 +74,28 @@ public class MonitorService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         startForeground(NOTIFICATION_ID, createNotification("DeviceObserver 监控中..."));
-        startSampling();
+
+        // 处理前台/后台切换
+        if (intent != null && intent.hasExtra("foreground")) {
+            boolean wasForeground = isForeground;
+            isForeground = intent.getBooleanExtra("foreground", true);
+            if (wasForeground != isForeground) {
+                rescheduleSampling();
+            }
+        }
+
+        // 首次启动时开始采样
+        if (samplingRunnableStarted.compareAndSet(false, true)) {
+            startSampling();
+        }
         return START_NOT_STICKY;
     }
 
     private void startSampling() {
-        // 根据前台/后台状态选择间隔
         long interval = isForeground ? FOREGROUND_INTERVAL : BACKGROUND_INTERVAL;
         workExecutor.scheduleAtFixedRate(() -> {
             if (!running.get()) return;
-            // 防止采样任务堆积
-            if (!samplingInProgress.compareAndSet(false, true)) {
-                return;
-            }
+            if (!samplingInProgress.compareAndSet(false, true)) return;
             try {
                 performSample();
             } finally {
@@ -85,29 +104,34 @@ public class MonitorService extends Service {
         }, 0, interval, TimeUnit.MILLISECONDS);
     }
 
-    /**
-     * 重新调度采样（前后台切换时调用）
-     */
     private void rescheduleSampling() {
-        // 用 shutdown() 而非 shutdownNow()，让正在执行的采样完成（避免中断 Room 事务）
         if (workExecutor != null && !workExecutor.isShutdown()) {
             workExecutor.shutdown();
         }
         workExecutor = Executors.newSingleThreadScheduledExecutor();
         running.set(true);
-        samplingInProgress.set(false);  // 重置防堆积标志
+        samplingInProgress.set(false);
         startSampling();
     }
 
-    /**
-     * 执行一次采样 —— I/O 在 workExecutor 线程执行
-     */
     private void performSample() {
         long now = System.currentTimeMillis();
 
+        // CPU 使用率（统一计算）
+        long[] curStat = SystemMonitor.readCpuStat();
+        float cpuUsage = 0;
+        if (prevCpuStat != null && curStat != null) {
+            float[] usage = SystemMonitor.getCpuUsageRate(prevCpuStat, curStat);
+            if (usage != null) cpuUsage = usage[1];
+        }
+        prevCpuStat = curStat;
+
         // 内存
         long[] memInfo = SystemMonitor.getMemoryInfo();
+        long memTotal = memInfo[0];
         long memAvailable = memInfo[2] > 0 ? memInfo[2] : memInfo[1];
+        float memUsagePct = memTotal > 0
+            ? (float) (memTotal - memAvailable) / memTotal * 100f : 0;
 
         // 温度
         float cpuTemp = -1;
@@ -132,18 +156,31 @@ public class MonitorService extends Service {
                 netTx += ni.txBytes;
             }
         }
+        long rxRate = (prevRxBytes > 0 && netRx >= prevRxBytes) ? (netRx - prevRxBytes) : 0;
+        long txRate = (prevTxBytes > 0 && netTx >= prevTxBytes) ? (netTx - prevTxBytes) : 0;
+        prevRxBytes = netRx;
+        prevTxBytes = netTx;
 
-        // 温度告警（回主线程更新通知）
-        if (cpuTemp > 60) {
+        // 温度告警
+        if (cpuTemp > TEMP_ALERT_THRESHOLD) {
             final float alertTemp = cpuTemp;
             handler.post(() -> updateNotification("⚠ 温度告警: "
                 + String.format("%.1f", alertTemp) + "°C"));
         }
 
+        // 广播采样数据给 UI
+        Intent sampleIntent = new Intent(ACTION_SAMPLE);
+        sampleIntent.putExtra(EXTRA_CPU_USAGE, cpuUsage);
+        sampleIntent.putExtra(EXTRA_MEM_USAGE, memUsagePct);
+        sampleIntent.putExtra(EXTRA_CPU_TEMP, cpuTemp);
+        sampleIntent.putExtra(EXTRA_NET_RX, rxRate);
+        sampleIntent.putExtra(EXTRA_NET_TX, txRate);
+        sendBroadcast(sampleIntent);
+
         // 持久化到 Room（事务）
         SampleRecord record = new SampleRecord();
         record.timestamp = now;
-        record.cpuUsage = 0;
+        record.cpuUsage = cpuUsage;
         record.memAvailableKb = memAvailable;
         record.cpuTemp = cpuTemp;
         record.netRxBytes = netRx;
@@ -194,13 +231,14 @@ public class MonitorService extends Service {
 
     public void setForeground(boolean foreground) {
         this.isForeground = foreground;
+        rescheduleSampling();
     }
 
     @Override
     public void onTaskRemoved(Intent rootIntent) {
         super.onTaskRemoved(rootIntent);
         isForeground = false;
-        rescheduleSampling();  // 切换到后台 5 秒间隔
+        rescheduleSampling();
     }
 
     @Override

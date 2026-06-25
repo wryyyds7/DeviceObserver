@@ -1,6 +1,9 @@
 package com.wry.deviceobserver.activity;
 
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.os.Bundle;
 import android.view.View;
 import android.widget.TextView;
@@ -8,18 +11,12 @@ import android.widget.TextView;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.wry.deviceobserver.R;
-import com.wry.deviceobserver.monitor.SystemMonitor;
 import com.wry.deviceobserver.service.MonitorService;
 import com.wry.deviceobserver.view.RealTimeChartView;
 
-import java.util.List;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-
 /**
- * 主界面：实时展示系统性能指标
+ * 主界面：接收 Service 广播的采样数据并展示
+ * 不自己采样，不在 onDestroy 停止 Service（后台持续监控）
  */
 public class MainActivity extends AppCompatActivity {
 
@@ -28,15 +25,7 @@ public class MainActivity extends AppCompatActivity {
     private RealTimeChartView chartTemp;
     private TextView tvSummary;
 
-    // CPU 采样状态
-    private volatile long[] prevCpuStat = null;
-    // 前一次网络流量
-    private volatile long prevRxBytes = 0;
-    private volatile long prevTxBytes = 0;
-
-    private static final int INTERVAL_MS = 1000;
-    private ScheduledExecutorService samplingExecutor;
-    private final AtomicBoolean samplingInProgress = new AtomicBoolean(false);
+    private SampleReceiver receiver;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -61,97 +50,41 @@ public class MainActivity extends AppCompatActivity {
         chartTemp.setUnit("°C");
         chartTemp.setLineColor(0xFFF59E0B);
 
-        // 启动前台服务
+        // 启动前台服务（唯一采样源）
         Intent serviceIntent = new Intent(this, MonitorService.class);
         startForegroundService(serviceIntent);
 
-        samplingExecutor = Executors.newSingleThreadScheduledExecutor();
-        startSampling();
+        // 注册广播接收器
+        receiver = new SampleReceiver();
+        IntentFilter filter = new IntentFilter(MonitorService.ACTION_SAMPLE);
+        registerReceiver(receiver, filter);
     }
 
-    private void startSampling() {
-        samplingExecutor.scheduleAtFixedRate(() -> {
-            // 防止采样任务堆积：如果上一次还在跑，跳过本次
-            if (!samplingInProgress.compareAndSet(false, true)) {
-                return;
-            }
-            try {
-                performSample();
-            } finally {
-                samplingInProgress.set(false);
-            }
-        }, 0, INTERVAL_MS, TimeUnit.MILLISECONDS);
-    }
+    /**
+     * 广播接收器：接收 Service 的采样数据
+     */
+    private class SampleReceiver extends BroadcastReceiver {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (!MonitorService.ACTION_SAMPLE.equals(intent.getAction())) return;
+            if (isFinishing() || isDestroyed()) return;
 
-    private void performSample() {
-        // CPU
-        long[] curStat = SystemMonitor.readCpuStat();
-        float cpuUsage = 0;
-        if (prevCpuStat != null && curStat != null) {
-            float[] usage = SystemMonitor.getCpuUsageRate(prevCpuStat, curStat);
-            if (usage != null) cpuUsage = usage[1];
-        }
-        prevCpuStat = curStat;
+            float cpuUsage = intent.getFloatExtra(MonitorService.EXTRA_CPU_USAGE, 0);
+            float memUsage = intent.getFloatExtra(MonitorService.EXTRA_MEM_USAGE, 0);
+            float cpuTemp = intent.getFloatExtra(MonitorService.EXTRA_CPU_TEMP, 0);
+            long netRx = intent.getLongExtra(MonitorService.EXTRA_NET_RX, 0);
+            long netTx = intent.getLongExtra(MonitorService.EXTRA_NET_TX, 0);
 
-        // 内存
-        long[] memInfo = SystemMonitor.getMemoryInfo();
-        long memTotal = memInfo[0];
-        long memAvailable = memInfo[2] > 0 ? memInfo[2] : memInfo[1];
-        float memUsagePct = memTotal > 0
-            ? (float) (memTotal - memAvailable) / memTotal * 100f
-            : 0;
+            chartCpu.addPoint(cpuUsage);
+            chartMemory.addPoint(memUsage);
+            chartTemp.addPoint(cpuTemp);
 
-        // 温度
-        float cpuTemp = -1;  // 用 -1 表示未找到
-        List<SystemMonitor.ThermalZone> zones = SystemMonitor.getThermalZones();
-        for (SystemMonitor.ThermalZone z : zones) {
-            if (z.type.contains("cpu") || z.type.contains("CPU")) {
-                cpuTemp = (float) z.tempCelsius;
-                break;
-            }
-        }
-        if (cpuTemp < 0 && !zones.isEmpty()) {
-            cpuTemp = (float) zones.get(0).tempCelsius;
-        }
-        if (cpuTemp < 0) cpuTemp = 0;  // 全部失败时显示 0
-
-        // 网络流量（增量）
-        long netRx = 0, netTx = 0;
-        List<SystemMonitor.NetworkInterface> ifs = SystemMonitor.getNetworkInterfaces();
-        for (SystemMonitor.NetworkInterface ni : ifs) {
-            if (!ni.name.equals("lo")) {
-                netRx += ni.rxBytes;
-                netTx += ni.txBytes;
-            }
-        }
-        long rxRate = (prevRxBytes > 0 && netRx >= prevRxBytes) ? (netRx - prevRxBytes) : 0;
-        long txRate = (prevTxBytes > 0 && netTx >= prevTxBytes) ? (netTx - prevTxBytes) : 0;
-        prevRxBytes = netRx;
-        prevTxBytes = netTx;
-
-        // UI 更新回到主线程
-        final float finalCpuUsage = cpuUsage;
-        final float finalMemUsagePct = memUsagePct;
-        final float finalCpuTemp = cpuTemp;
-        final long finalTxRate = txRate;
-        final long finalRxRate = rxRate;
-
-        if (!isFinishing() && !isDestroyed()) {
-            runOnUiThread(() -> {
-                chartCpu.addPoint(finalCpuUsage);
-                chartMemory.addPoint(finalMemUsagePct);
-                chartTemp.addPoint(finalCpuTemp);
-
-                String summary = String.format(
-                    "CPU: %.1f%%  |  Mem: %.1f%%  |  Temp: %.1f°C  |  ↑ %s  ↓ %s",
-                    finalCpuUsage,
-                    finalMemUsagePct,
-                    finalCpuTemp,
-                    formatBytes(finalTxRate),
-                    formatBytes(finalRxRate)
-                );
-                tvSummary.setText(summary);
-            });
+            String summary = String.format(
+                "CPU: %.1f%%  |  Mem: %.1f%%  |  Temp: %.1f°C  |  ↑ %s  ↓ %s",
+                cpuUsage, memUsage, cpuTemp,
+                formatBytes(netTx), formatBytes(netRx)
+            );
+            tvSummary.setText(summary);
         }
     }
 
@@ -161,20 +94,34 @@ public class MainActivity extends AppCompatActivity {
         return String.format("%.1fMB", bytes / 1024.0 / 1024);
     }
 
-    /**
-     * 进程列表入口
-     */
     public void onProcessClick(View view) {
         startActivity(new Intent(this, ProcessActivity.class));
     }
 
     @Override
+    protected void onPause() {
+        super.onPause();
+        // 通知 Service 切换到后台采样频率
+        Intent intent = new Intent(this, MonitorService.class);
+        intent.putExtra("foreground", false);
+        startService(intent);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // 通知 Service 切换到前台采样频率
+        Intent intent = new Intent(this, MonitorService.class);
+        intent.putExtra("foreground", true);
+        startService(intent);
+    }
+
+    @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (samplingExecutor != null && !samplingExecutor.isShutdown()) {
-            samplingExecutor.shutdownNow();
+        if (receiver != null) {
+            unregisterReceiver(receiver);
         }
-        // 停止前台服务
-        stopService(new Intent(this, MonitorService.class));
+        // 不停止 Service —— 后台持续监控
     }
 }
