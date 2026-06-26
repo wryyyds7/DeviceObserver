@@ -27,7 +27,7 @@ public class ProcessActivity extends AppCompatActivity {
     private ProcessAdapter adapter;
     private ScheduledExecutorService scanExecutor;
     private final AtomicBoolean scanning = new AtomicBoolean(false);
-    private boolean initialized = false;
+    private volatile boolean initialized = false;
 
     private static final int INTERVAL_MS = 2000;
 

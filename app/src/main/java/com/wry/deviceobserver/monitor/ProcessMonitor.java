@@ -17,8 +17,9 @@ public class ProcessMonitor {
     private final boolean isRoot;
     // PID → 历次 VmRSS 记录，用于检测内存泄漏
     private final Map<Integer, long[]> pidRssHistory = new HashMap<>();
-    private static final int LEAK_CHECK_COUNT = 3;       // 连续 N 次
-    private static final long LEAK_THRESHOLD_KB = 10 * 1024; // 每次增长 > 10MB
+    private static final int LEAK_CHECK_COUNT = 3;
+    private static final long LEAK_THRESHOLD_KB = 10 * 1024;
+    private static final int MAX_HISTORY_SIZE = 512; // 防止无限增长
 
     public ProcessMonitor(boolean isRoot) {
         this.isRoot = isRoot;
@@ -31,6 +32,9 @@ public class ProcessMonitor {
      */
     public List<ProcessInfo> scanAllProcesses() {
         List<ProcessInfo> processes = new ArrayList<>();
+
+        // 清理已退出进程的历史记录，防止 Map 无限增长
+        cleanStaleHistory();
 
         if (isRoot) {
             File procDir = new File("/proc");
@@ -152,6 +156,16 @@ public class ProcessMonitor {
             }
         } catch (Exception e) {
             // ignore
+        }
+    }
+
+    /**
+     * 清理已退出进程的历史记录 + 限制 Map 大小
+     */
+    private void cleanStaleHistory() {
+        // 超过上限时清除全部历史（简单策略，避免遍历 /proc 检查存活）
+        if (pidRssHistory.size() > MAX_HISTORY_SIZE) {
+            pidRssHistory.clear();
         }
     }
 

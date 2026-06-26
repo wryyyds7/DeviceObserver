@@ -134,7 +134,7 @@ public class PermissionActivity extends AppCompatActivity {
     protected void onDestroy() {
         super.onDestroy();
         if (rootExecutor != null && !rootExecutor.isShutdown()) {
-            rootExecutor.shutdown();
+            rootExecutor.shutdownNow();
         }
     }
 

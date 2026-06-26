@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.os.Build;
 import android.os.Bundle;
 import android.view.View;
 import android.widget.TextView;
@@ -54,10 +55,14 @@ public class MainActivity extends AppCompatActivity {
         Intent serviceIntent = new Intent(this, MonitorService.class);
         startForegroundService(serviceIntent);
 
-        // 注册广播接收器
+        // 注册广播接收器（Android 14+ 需要 RECEIVER_NOT_EXPORTED）
         receiver = new SampleReceiver();
         IntentFilter filter = new IntentFilter(MonitorService.ACTION_SAMPLE);
-        registerReceiver(receiver, filter);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(receiver, filter);
+        }
     }
 
     /**

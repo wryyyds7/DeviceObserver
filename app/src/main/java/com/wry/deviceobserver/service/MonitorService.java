@@ -17,6 +17,7 @@ import androidx.core.app.NotificationCompat;
 import com.wry.deviceobserver.R;
 import com.wry.deviceobserver.activity.MainActivity;
 import com.wry.deviceobserver.database.AppDatabase;
+import com.wry.deviceobserver.dao.SampleRecordDao;
 import com.wry.deviceobserver.model.SampleRecord;
 import com.wry.deviceobserver.monitor.SystemMonitor;
 
@@ -62,6 +63,8 @@ public class MonitorService extends Service {
     // 前一次网络流量
     private long prevRxBytes = 0;
     private long prevTxBytes = 0;
+    // 缓存的 DAO 引用，避免每次采样调用 getInstance
+    private SampleRecordDao cachedDao;
 
     @Override
     public void onCreate() {
@@ -69,12 +72,14 @@ public class MonitorService extends Service {
         handler = new Handler(Looper.getMainLooper());
         workExecutor = Executors.newSingleThreadScheduledExecutor();
         createNotificationChannel();
+        // 在 onCreate 中立即调用 startForeground，避免 5 秒超时崩溃
+        startForeground(NOTIFICATION_ID, createNotification("DeviceObserver 监控中..."));
+        // 缓存 DAO 引用
+        cachedDao = AppDatabase.getInstance(this).sampleRecordDao();
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        startForeground(NOTIFICATION_ID, createNotification("DeviceObserver 监控中..."));
-
         // 处理前台/后台切换
         if (intent != null && intent.hasExtra("foreground")) {
             boolean wasForeground = isForeground;
@@ -106,7 +111,10 @@ public class MonitorService extends Service {
 
     private void rescheduleSampling() {
         if (workExecutor != null && !workExecutor.isShutdown()) {
-            workExecutor.shutdown();
+            workExecutor.shutdownNow();
+            try {
+                workExecutor.awaitTermination(1, TimeUnit.SECONDS);
+            } catch (InterruptedException ignored) {}
         }
         workExecutor = Executors.newSingleThreadScheduledExecutor();
         running.set(true);
@@ -168,8 +176,9 @@ public class MonitorService extends Service {
                 + String.format("%.1f", alertTemp) + "°C"));
         }
 
-        // 广播采样数据给 UI
+        // 广播采样数据给 UI（限制包名，防止第三方 App 窃听）
         Intent sampleIntent = new Intent(ACTION_SAMPLE);
+        sampleIntent.setPackage(getPackageName());
         sampleIntent.putExtra(EXTRA_CPU_USAGE, cpuUsage);
         sampleIntent.putExtra(EXTRA_MEM_USAGE, memUsagePct);
         sampleIntent.putExtra(EXTRA_CPU_TEMP, cpuTemp);
@@ -188,9 +197,8 @@ public class MonitorService extends Service {
         record.processCount = 0;
 
         AppDatabase.getInstance(this).runInTransaction(() -> {
-            AppDatabase.getInstance(this).sampleRecordDao().insert(record);
-            AppDatabase.getInstance(this).sampleRecordDao()
-                .deleteBefore(now - 24 * 60 * 60 * 1000);
+            cachedDao.insert(record);
+            cachedDao.deleteBefore(now - 24 * 60 * 60 * 1000);
         });
     }
 

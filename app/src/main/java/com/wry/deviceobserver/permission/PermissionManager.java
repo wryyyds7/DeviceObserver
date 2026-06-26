@@ -68,6 +68,9 @@ public class PermissionManager {
             }
             if (!finished) {
                 process.destroyForcibly();
+                try {
+                    process.waitFor(1, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (InterruptedException ignored) {}
                 cachedRootResult = false;
                 cachedRootTimestamp = now;
                 return false;
