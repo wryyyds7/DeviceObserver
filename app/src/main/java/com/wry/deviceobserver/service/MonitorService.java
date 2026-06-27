@@ -5,7 +5,10 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -42,6 +45,8 @@ public class MonitorService extends Service {
     public static final String EXTRA_CPU_TEMP = "cpu_temp";
     public static final String EXTRA_NET_RX = "net_rx";
     public static final String EXTRA_NET_TX = "net_tx";
+    public static final String ACTION_SET_FOREGROUND = "com.wry.deviceobserver.SET_FOREGROUND";
+    public static final String EXTRA_FOREGROUND = "foreground";
 
     private static final String TAG = "MonitorService";
     private static final String CHANNEL_ID = "monitor_channel";
@@ -63,8 +68,11 @@ public class MonitorService extends Service {
     // 前一次网络流量
     private long prevRxBytes = 0;
     private long prevTxBytes = 0;
-    // 缓存的 DAO 引用，避免每次采样调用 getInstance
+    // 缓存的 DAO 和 Database 引用，避免每次采样调用 getInstance
     private SampleRecordDao cachedDao;
+    private AppDatabase cachedDb;
+    // 广播接收器：接收前台/后台切换通知
+    private BroadcastReceiver foregroundReceiver;
 
     @Override
     public void onCreate() {
@@ -74,21 +82,33 @@ public class MonitorService extends Service {
         createNotificationChannel();
         // 在 onCreate 中立即调用 startForeground，避免 5 秒超时崩溃
         startForeground(NOTIFICATION_ID, createNotification("DeviceObserver 监控中..."));
-        // 缓存 DAO 引用
-        cachedDao = AppDatabase.getInstance(this).sampleRecordDao();
+        // 缓存 DAO 和 DB 引用
+        cachedDb = AppDatabase.getInstance(this);
+        cachedDao = cachedDb.sampleRecordDao();
+
+        // 注册广播接收器：接收前台/后台切换（避免 startService 在 Android 12+ 被限制）
+        foregroundReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (ACTION_SET_FOREGROUND.equals(intent.getAction())) {
+                    boolean wasForeground = isForeground;
+                    isForeground = intent.getBooleanExtra(EXTRA_FOREGROUND, true);
+                    if (wasForeground != isForeground) {
+                        rescheduleSampling();
+                    }
+                }
+            }
+        };
+        IntentFilter fgFilter = new IntentFilter(ACTION_SET_FOREGROUND);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(foregroundReceiver, fgFilter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(foregroundReceiver, fgFilter);
+        }
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        // 处理前台/后台切换
-        if (intent != null && intent.hasExtra("foreground")) {
-            boolean wasForeground = isForeground;
-            isForeground = intent.getBooleanExtra("foreground", true);
-            if (wasForeground != isForeground) {
-                rescheduleSampling();
-            }
-        }
-
         // 首次启动时开始采样
         if (samplingRunnableStarted.compareAndSet(false, true)) {
             startSampling();
@@ -140,6 +160,9 @@ public class MonitorService extends Service {
         long memAvailable = memInfo[2] > 0 ? memInfo[2] : memInfo[1];
         float memUsagePct = memTotal > 0
             ? (float) (memTotal - memAvailable) / memTotal * 100f : 0;
+        if (memTotal == 0) {
+            Log.w(TAG, "getMemoryInfo returned zero — /proc/meminfo read failed");
+        }
 
         // 温度
         float cpuTemp = -1;
@@ -192,11 +215,11 @@ public class MonitorService extends Service {
         record.cpuUsage = cpuUsage;
         record.memAvailableKb = memAvailable;
         record.cpuTemp = cpuTemp;
-        record.netRxBytes = netRx;
-        record.netTxBytes = netTx;
-        record.processCount = 0;
+        record.netRxBytes = rxRate;   // 存储速率（与广播一致）
+        record.netTxBytes = txRate;
+        record.processCount = 0;      // 进程数由 ProcessActivity 统计
 
-        AppDatabase.getInstance(this).runInTransaction(() -> {
+        cachedDb.runInTransaction(() -> {
             cachedDao.insert(record);
             cachedDao.deleteBefore(now - 24 * 60 * 60 * 1000);
         });
@@ -237,11 +260,6 @@ public class MonitorService extends Service {
 
     // ===== 生命周期 =====
 
-    public void setForeground(boolean foreground) {
-        this.isForeground = foreground;
-        rescheduleSampling();
-    }
-
     @Override
     public void onTaskRemoved(Intent rootIntent) {
         super.onTaskRemoved(rootIntent);
@@ -253,6 +271,9 @@ public class MonitorService extends Service {
     public void onDestroy() {
         super.onDestroy();
         running.set(false);
+        if (foregroundReceiver != null) {
+            unregisterReceiver(foregroundReceiver);
+        }
         if (workExecutor != null && !workExecutor.isShutdown()) {
             workExecutor.shutdownNow();
         }

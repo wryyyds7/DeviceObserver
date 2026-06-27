@@ -106,19 +106,21 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onPause() {
         super.onPause();
-        // 通知 Service 切换到后台采样频率
-        Intent intent = new Intent(this, MonitorService.class);
-        intent.putExtra("foreground", false);
-        startService(intent);
+        // 通过广播通知 Service 切换到后台采样频率（避免 startService 在 Android 12+ 被限制）
+        Intent intent = new Intent(MonitorService.ACTION_SET_FOREGROUND);
+        intent.setPackage(getPackageName());
+        intent.putExtra(MonitorService.EXTRA_FOREGROUND, false);
+        sendBroadcast(intent);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        // 通知 Service 切换到前台采样频率
-        Intent intent = new Intent(this, MonitorService.class);
-        intent.putExtra("foreground", true);
-        startService(intent);
+        // 通过广播通知 Service 切换到前台采样频率
+        Intent intent = new Intent(MonitorService.ACTION_SET_FOREGROUND);
+        intent.setPackage(getPackageName());
+        intent.putExtra(MonitorService.EXTRA_FOREGROUND, true);
+        sendBroadcast(intent);
     }
 
     @Override

@@ -4,9 +4,9 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 进程监控：root 下遍历 /proc/[pid]/ 获取所有进程的 CPU、内存、网络信息。
@@ -16,7 +16,7 @@ public class ProcessMonitor {
 
     private final boolean isRoot;
     // PID → 历次 VmRSS 记录，用于检测内存泄漏
-    private final Map<Integer, long[]> pidRssHistory = new HashMap<>();
+    private final Map<Integer, long[]> pidRssHistory = new ConcurrentHashMap<>();
     private static final int LEAK_CHECK_COUNT = 3;
     private static final long LEAK_THRESHOLD_KB = 10 * 1024;
     private static final int MAX_HISTORY_SIZE = 512; // 防止无限增长
@@ -175,16 +175,25 @@ public class ProcessMonitor {
     private void checkMemoryLeak(int pid, long currentRssKb, ProcessInfo info) {
         long[] history = pidRssHistory.get(pid);
         if (history == null) {
-            history = new long[LEAK_CHECK_COUNT];
+            // 首次：分配数组并记录采样次数
+            history = new long[LEAK_CHECK_COUNT + 1]; // 最后一位存计数
             history[0] = currentRssKb;
+            history[LEAK_CHECK_COUNT] = 1; // 已采样 1 次
             pidRssHistory.put(pid, history);
             return;
         }
 
+        int count = (int) history[LEAK_CHECK_COUNT];
         // 左移历史，填入新值
         System.arraycopy(history, 1, history, 0, LEAK_CHECK_COUNT - 1);
         history[LEAK_CHECK_COUNT - 1] = currentRssKb;
-        pidRssHistory.put(pid, history);
+        count++;
+        history[LEAK_CHECK_COUNT] = count;
+
+        // 不足 3 次采样时不做检测
+        if (count < LEAK_CHECK_COUNT) {
+            return;
+        }
 
         // 检查是否连续 3 次增长 > 10MB
         boolean allIncreasing = true;
